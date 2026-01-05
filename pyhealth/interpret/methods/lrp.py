@@ -6,7 +6,7 @@ from typing import Dict, Optional, Literal, List, Tuple
 from pyhealth.models import BaseModel
 
 
-class LayerWiseRelevancePropagation:
+class LayerwiseRelevancePropagation:
     """Layer-wise Relevance Propagation attribution method for PyHealth models.
 
     This class implements the LRP method for computing feature attributions
@@ -130,10 +130,6 @@ class LayerWiseRelevancePropagation:
         # Storage for activations and hooks
         self.hooks = []
         self.activations = {}
-        
-        # Track concatenation structure for branching models
-        self.branch_info = {}  # Maps layer names to their feature branches
-        self.concat_point = None  # Name of the layer where concatenation occurs
 
         # Validate model compatibility
         if use_embeddings:
@@ -253,6 +249,56 @@ class LayerWiseRelevancePropagation:
             )
 
         return attributions
+
+    def visualize(
+        self,
+        plt,
+        image: torch.Tensor,
+        relevance: torch.Tensor,
+        title: Optional[str] = None,
+        method: str = 'overlay',
+        **kwargs
+    ) -> None:
+        """Visualize LRP relevance maps using the SaliencyVisualizer.
+        
+        Convenience method for visualizing LRP attributions with various
+        visualization styles.
+        
+        Args:
+            plt: matplotlib.pyplot instance
+            image: Input image tensor [C, H, W] or [B, C, H, W]
+            relevance: LRP relevance tensor (output from attribute())
+            title: Optional title for the plot
+            method: Visualization method:
+                - 'overlay': Image with relevance overlay (default)
+                - 'heatmap': Standalone relevance heatmap
+                - 'top_k': Highlight top-k most relevant features
+            **kwargs: Additional arguments passed to visualization method
+                - alpha: Transparency for overlay (default: 0.3)
+                - cmap: Colormap (default: 'hot')
+                - k: Number of top features for 'top_k' method
+        
+        Examples:
+            >>> lrp = LayerwiseRelevancePropagation(model)
+            >>> attributions = lrp.attribute(**batch)
+            >>> 
+            >>> # Overlay visualization
+            >>> lrp.visualize(plt, batch['image'][0], attributions['image'][0])
+            >>> 
+            >>> # Heatmap only
+            >>> lrp.visualize(plt, batch['image'][0], attributions['image'][0],
+            ...               method='heatmap')
+            >>> 
+            >>> # Top-10 features
+            >>> lrp.visualize(plt, batch['image'][0], attributions['image'][0],
+            ...               method='top_k', k=10)
+        """
+        from pyhealth.interpret.methods.saliency_visualization import visualize_attribution
+        
+        if title is None:
+            title = f"LRP Attribution ({self.rule}-rule)"
+        
+        visualize_attribution(plt, image, relevance, title=title, method=method, **kwargs)
 
     def _compute_from_embeddings(
         self,
@@ -437,64 +483,6 @@ class LayerWiseRelevancePropagation:
 
         return relevance_at_inputs
 
-    def visualize_saliency_map(self, plt, relevance_map, image, *, title=None, alpha=0.3):
-        """Visualize LRP relevance as a saliency map overlay on an image.
-        
-        Args:
-            plt: matplotlib.pyplot instance
-            relevance_map: Relevance tensor [H, W] or [C, H, W]
-            image: Original image tensor [C, H, W] or [H, W]
-            title: Optional title for the plot
-            alpha: Transparency of relevance overlay (default: 0.3)
-        """
-        import numpy as np
-        
-        if plt is None:
-            import matplotlib.pyplot as plt
-        
-        # Convert to numpy and handle dimensions
-        if isinstance(relevance_map, torch.Tensor):
-            relevance_np = relevance_map.detach().cpu().numpy()
-        else:
-            relevance_np = relevance_map
-        
-        if isinstance(image, torch.Tensor):
-            img_np = image.detach().cpu().numpy()
-        else:
-            img_np = image
-        
-        # Handle channel dimensions for relevance
-        if relevance_np.ndim == 3:  # [C, H, W]
-            relevance_np = np.sum(np.abs(relevance_np), axis=0)  # Sum across channels
-        elif relevance_np.ndim == 4:  # [B, C, H, W]
-            relevance_np = relevance_np[0]  # Take first batch
-            relevance_np = np.sum(np.abs(relevance_np), axis=0)
-        
-        # Handle channel dimensions for image
-        if img_np.ndim == 3 and img_np.shape[0] in [1, 3]:  # [C, H, W]
-            img_np = np.transpose(img_np, (1, 2, 0))  # Convert to [H, W, C]
-        elif img_np.ndim == 4:  # [B, C, H, W]
-            img_np = img_np[0]
-            if img_np.shape[0] in [1, 3]:
-                img_np = np.transpose(img_np, (1, 2, 0))
-        
-        # Handle single channel
-        if img_np.ndim == 3 and img_np.shape[-1] == 1:
-            img_np = img_np.squeeze(-1)
-        
-        # Normalize relevance for visualization
-        relevance_np = (relevance_np - relevance_np.min()) / (relevance_np.max() - relevance_np.min() + 1e-8)
-        
-        # Create visualization
-        plt.figure(figsize=(15, 7))
-        plt.axis('off')
-        plt.imshow(img_np, cmap='gray' if img_np.ndim == 2 else None)
-        plt.imshow(relevance_np, cmap='hot', alpha=alpha)
-        if title:
-            plt.title(title)
-        plt.colorbar(label='Relevance')
-        plt.show()
-
     def _register_hooks(self):
         """Register forward hooks to capture activations during forward pass.
 
@@ -527,9 +515,6 @@ class LayerWiseRelevancePropagation:
 
             return hook
 
-        # Detect branching structure for models with ModuleDict (like MLP)
-        self._detect_branches()
-        
         # Register hooks on layers we can propagate through
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.Linear, nn.ReLU, nn.LSTM, nn.GRU, 
@@ -537,33 +522,6 @@ class LayerWiseRelevancePropagation:
                                  nn.AdaptiveAvgPool2d, nn.BatchNorm2d)):
                 handle = module.register_forward_hook(save_activation(name))
                 self.hooks.append(handle)
-
-    def _detect_branches(self):
-        """Detect parallel branches in model architecture (e.g., ModuleDict in MLP).
-        
-        For PyHealth MLP models, features are processed in parallel branches
-        through separate MLPs, then concatenated before the final FC layer.
-        This method identifies these branches and the concatenation point.
-        """
-        # Check if model has feature_keys attribute (indicating MLP-like structure)
-        if hasattr(self.model, 'feature_keys') and hasattr(self.model, 'mlp'):
-            # Model has parallel branches per feature
-            for feature_key in self.model.feature_keys:
-                branch_layers = []
-                # Find all layers in this branch
-                for name, module in self.model.named_modules():
-                    if f'mlp.{feature_key}' in name:
-                        branch_layers.append(name)
-                
-                if branch_layers:
-                    self.branch_info[feature_key] = {
-                        'layers': branch_layers,
-                        'hidden_dim': getattr(self.model, 'hidden_dim', None)
-                    }
-            
-            # The FC layer is where concatenation outputs are processed
-            if hasattr(self.model, 'fc'):
-                self.concat_point = 'fc'
     
     def _remove_hooks(self):
         """Remove all registered hooks to free memory."""
@@ -571,8 +529,55 @@ class LayerWiseRelevancePropagation:
             hook.remove()
         self.hooks = []
         self.activations = {}
-        self.branch_info = {}
-        self.concat_point = None
+
+    def _match_shapes(
+        self,
+        relevance: torch.Tensor,
+        target_shape: torch.Size,
+    ) -> torch.Tensor:
+        """Match relevance tensor shape to target shape.
+        
+        Args:
+            relevance: Relevance tensor to reshape
+            target_shape: Desired output shape
+            
+        Returns:
+            Reshaped relevance tensor matching target_shape
+        """
+        if relevance.shape == target_shape:
+            return relevance
+        
+        batch_size = relevance.shape[0]
+        
+        # 2D -> 4D: Flatten to spatial
+        if relevance.dim() == 2 and len(target_shape) == 4:
+            C, H, W = target_shape[1], target_shape[2], target_shape[3]
+            
+            # Direct reshape if dimensions match
+            if relevance.shape[1] == C * H * W:
+                return relevance.view(batch_size, C, H, W)
+            
+            # Distribute relevance uniformly
+            total_rel = relevance.sum(dim=1, keepdim=True)
+            per_element = total_rel / (C * H * W)
+            return per_element.view(batch_size, 1, 1, 1).expand(batch_size, C, H, W)
+        
+        # 4D -> 4D: Interpolate
+        if relevance.dim() == 4 and len(target_shape) == 4:
+            if relevance.shape[1] != target_shape[1]:
+                relevance = relevance.mean(dim=1, keepdim=True).expand(-1, target_shape[1], -1, -1)
+            if relevance.shape[2:] != target_shape[2:]:
+                relevance = F.interpolate(relevance, size=target_shape[2:], mode='bilinear', align_corners=False)
+            return relevance
+        
+        # 3D -> 4D: Add channel dimension
+        if relevance.dim() == 3 and len(target_shape) == 4:
+            relevance = relevance.unsqueeze(1).expand(-1, target_shape[1], -1, -1)
+            if relevance.shape[2:] != target_shape[2:]:
+                relevance = F.interpolate(relevance, size=target_shape[2:], mode='bilinear', align_corners=False)
+            return relevance
+        
+        return relevance
 
     def _propagate_relevance_backward(
         self,
@@ -584,12 +589,6 @@ class LayerWiseRelevancePropagation:
         This is the core LRP algorithm. It iterates through layers in
         reverse order, applying the appropriate LRP rule to redistribute
         relevance from each layer to the previous layer.
-        
-        For branching architectures (like PyHealth MLP), this handles:
-        1. Propagating from FC layer to concatenation point
-        2. Splitting relevance for parallel branches
-        3. Propagating through each branch independently
-        4. Collecting relevance at embeddings
 
         Args:
             output_relevance: Relevance at the output layer.
@@ -598,278 +597,36 @@ class LayerWiseRelevancePropagation:
         Returns:
             Dictionary of relevance scores at the embedding layer.
         """
-        # Start with output relevance
         current_relevance = output_relevance
-
-        # Get layer names in reverse order (output to input)
         layer_names = list(reversed(list(self.activations.keys())))
-        
-        print(f"DEBUG _propagate_relevance_backward: Processing {len(layer_names)} layers")
-        print(f"DEBUG First 10 layers (reversed): {layer_names[:10]}")
-        print(f"DEBUG Looking for downsample pattern...")
-        for name in layer_names:
-            if 'downsample' in name:
-                print(f"DEBUG Found: {name}")
-        
-        # Track relevance for each branch if we have branching architecture
-        branch_relevances = {}
-        in_branches = False
 
         # Propagate through each layer
-        for idx, layer_name in enumerate(layer_names):
+        for layer_name in layer_names:
             activation_info = self.activations[layer_name]
             module = activation_info["module"]
+            output_tensor = activation_info["output"]
             
-            print(f"DEBUG Processing layer [{idx}]: {layer_name}, type={module.__class__.__name__}, relevance shape={current_relevance.shape}")
+            # Ensure shape compatibility before layer processing
+            if current_relevance.shape != output_tensor.shape:
+                current_relevance = self._match_shapes(current_relevance, output_tensor.shape)
             
-            # Check if this is the concatenation point (FC layer in MLP)
-            if self.concat_point and layer_name == self.concat_point:
-                # Propagate through FC layer
-                if isinstance(module, nn.Linear):
-                    current_relevance = self._lrp_linear(
-                        module, activation_info, current_relevance
-                    )
-                
-                # After FC, split relevance for parallel branches
-                if self.branch_info:
-                    branch_relevances = self._split_relevance_for_branches(
-                        current_relevance, input_embeddings
-                    )
-                    in_branches = True
-                continue
-            
-            # If we're in parallel branches, process each branch separately
-            if in_branches and self.branch_info:
-                # Check which branch this layer belongs to
-                for feature_key, branch_data in self.branch_info.items():
-                    if layer_name in branch_data['layers']:
-                        # Propagate through this branch layer
-                        if isinstance(module, nn.Linear):
-                            branch_relevances[feature_key] = self._lrp_linear(
-                                module, activation_info, branch_relevances[feature_key]
-                            )
-                        elif isinstance(module, nn.ReLU):
-                            branch_relevances[feature_key] = self._lrp_relu(
-                                activation_info, branch_relevances[feature_key]
-                            )
-                        break
-            else:
-                # Standard sequential propagation
-                if isinstance(module, nn.Linear):
-                    current_relevance = self._lrp_linear(
-                        module, activation_info, current_relevance
-                    )
-                elif isinstance(module, nn.Conv2d):
-                    # For Conv2d, relevance should match the OUTPUT shape of this conv layer
-                    output_tensor = activation_info["output"]
-                    
-                    # Validate and reshape if needed
-                    if current_relevance.shape != output_tensor.shape:
-                        print(f"DEBUG Conv2d {layer_name}: Shape mismatch!")
-                        print(f"  Relevance: {current_relevance.shape}, Expected output: {output_tensor.shape}")
-                        
-                        # If relevance is 2D but output is 4D, reshape it
-                        if current_relevance.dim() == 2 and output_tensor.dim() == 4:
-                            print(f"  Reshaping from 2D to 4D")
-                            current_relevance = self._reshape_relevance_fc_to_conv(
-                                current_relevance, output_tensor.shape
-                            )
-                        elif current_relevance.dim() == 4 and output_tensor.dim() == 4:
-                            print(f"  Reshaping between 4D tensors")
-                            current_relevance = self._reshape_relevance_fc_to_conv(
-                                current_relevance, output_tensor.shape
-                            )
-                    
-                    current_relevance = self._lrp_conv2d(
-                        module, activation_info, current_relevance
-                    )
-                elif isinstance(module, nn.ReLU):
-                    current_relevance = self._lrp_relu(activation_info, current_relevance)
-                elif isinstance(module, nn.MaxPool2d):
-                    # Relevance should match the OUTPUT shape of this pooling layer
-                    output_tensor = activation_info["output"]
-                    
-                    if current_relevance.shape != output_tensor.shape:
-                        print(f"DEBUG MaxPool2d {layer_name}: Reshaping from {current_relevance.shape} to {output_tensor.shape}")
-                        current_relevance = self._reshape_relevance_fc_to_conv(
-                            current_relevance, output_tensor.shape
-                        )
-                    
-                    current_relevance = self._lrp_maxpool2d(
-                        module, activation_info, current_relevance
-                    )
-                elif isinstance(module, (nn.AvgPool2d, nn.AdaptiveAvgPool2d)):
-                    # Relevance should match the OUTPUT shape of this pooling layer
-                    output_tensor = activation_info["output"]
-                    
-                    if current_relevance.shape != output_tensor.shape:
-                        print(f"DEBUG AvgPool {layer_name}: Reshaping from {current_relevance.shape} to {output_tensor.shape}")
-                        current_relevance = self._reshape_relevance_fc_to_conv(
-                            current_relevance, output_tensor.shape
-                        )
-                    
-                    current_relevance = self._lrp_avgpool2d(
-                        module, activation_info, current_relevance
-                    )
-                elif isinstance(module, nn.BatchNorm2d):
-                    # Relevance should match the OUTPUT shape of this batchnorm layer
-                    output_tensor = activation_info["output"]
-                    
-                    print(f"DEBUG BatchNorm2d {layer_name}: current_relevance={current_relevance.shape}, output={output_tensor.shape}")
-                    
-                    if current_relevance.shape != output_tensor.shape:
-                        print(f"DEBUG BatchNorm2d {layer_name}: Reshaping from {current_relevance.shape} to {output_tensor.shape}")
-                        current_relevance = self._reshape_relevance_fc_to_conv(
-                            current_relevance, output_tensor.shape
-                        )
-                    
-                    current_relevance = self._lrp_batchnorm2d(
-                        module, activation_info, current_relevance
-                    )
-                elif isinstance(module, (nn.LSTM, nn.GRU)):
-                    current_relevance = self._lrp_rnn(
-                        module, activation_info, current_relevance
-                    )
+            # Apply appropriate LRP rule based on layer type
+            if isinstance(module, nn.Linear):
+                current_relevance = self._lrp_linear(module, activation_info, current_relevance)
+            elif isinstance(module, nn.Conv2d):
+                current_relevance = self._lrp_conv2d(module, activation_info, current_relevance)
+            elif isinstance(module, nn.ReLU):
+                current_relevance = self._lrp_relu(activation_info, current_relevance)
+            elif isinstance(module, nn.MaxPool2d):
+                current_relevance = self._lrp_maxpool2d(module, activation_info, current_relevance)
+            elif isinstance(module, (nn.AvgPool2d, nn.AdaptiveAvgPool2d)):
+                current_relevance = self._lrp_avgpool2d(module, activation_info, current_relevance)
+            elif isinstance(module, nn.BatchNorm2d):
+                current_relevance = self._lrp_batchnorm2d(module, activation_info, current_relevance)
+            elif isinstance(module, (nn.LSTM, nn.GRU)):
+                current_relevance = self._lrp_rnn(module, activation_info, current_relevance)
 
-        # If we have branch relevances, use those; otherwise use current_relevance
-        if branch_relevances:
-            return branch_relevances
-        else:
-            # No branching - split the relevance to features
-            return self._split_relevance_to_features(current_relevance, input_embeddings)
-
-    def _reshape_relevance_fc_to_conv(
-        self,
-        relevance: torch.Tensor,
-        target_shape: torch.Size,
-    ) -> torch.Tensor:
-        """Reshape relevance from FC layer output to Conv layer input format.
-        
-        When propagating relevance backward from a fully-connected layer to
-        a convolutional layer, we need to reshape the 2D relevance tensor
-        [batch, features] to 4D [batch, channels, height, width].
-        
-        This function handles the common case where Conv features are flattened
-        before the FC layer (e.g., after adaptive pooling or flatten operation).
-        
-        Args:
-            relevance: Relevance tensor from FC layer [batch, fc_features]
-            target_shape: Desired output shape [batch, channels, height, width]
-            
-        Returns:
-            Reshaped relevance tensor matching target_shape
-            
-        Examples:
-            >>> # From FC output [32, 1000] back to conv [32, 512, 7, 7]
-            >>> relevance_fc = torch.randn(32, 1000)
-            >>> target = torch.Size([32, 512, 7, 7])
-            >>> relevance_conv = self._reshape_relevance_fc_to_conv(relevance_fc, target)
-            >>> relevance_conv.shape
-            torch.Size([32, 512, 7, 7])
-        """
-        batch_size = relevance.shape[0]
-        
-        # If relevance is already the right shape, return it
-        if relevance.shape == target_shape:
-            return relevance
-        
-        # If relevance is 2D [batch, features], reshape to 4D
-        if relevance.dim() == 2:
-            # Target is [batch, channels, height, width]
-            target_channels = target_shape[1]
-            target_height = target_shape[2]
-            target_width = target_shape[3]
-            target_spatial_size = target_height * target_width
-            
-            # Case 1: Relevance matches flattened conv features exactly
-            if relevance.shape[1] == target_channels * target_spatial_size:
-                # Direct reshape: [batch, C*H*W] -> [batch, C, H, W]
-                relevance = relevance.view(batch_size, target_channels, target_height, target_width)
-            
-            # Case 2: Relevance is from FC layer with different size (e.g., classifier)
-            # Need to redistribute relevance spatially
-            else:
-                # Try to infer a reasonable reshape
-                # First, try to see if relevance can be reshaped to spatial format
-                num_features = relevance.shape[1]
-                
-                # Try to find factors that give us channels * spatial_size
-                # Start by assuming all relevance goes to first channel, then use adaptive pooling
-                if num_features >= target_channels:
-                    # More features than channels - use adaptive pooling to distribute
-                    # This avoids interpolation issues with non-spatial tensors
-                    
-                    # Reshape to [B, C, -1] format for adaptive pooling
-                    features_per_channel = num_features // target_channels
-                    if features_per_channel * target_channels == num_features:
-                        # Clean division - reshape and average
-                        relevance = relevance.view(batch_size, target_channels, features_per_channel)
-                        relevance = relevance.mean(dim=2)  # Average within each channel -> [B, C]
-                    else:
-                        # Uneven division - use adaptive pooling on flattened features
-                        relevance = relevance.unsqueeze(1)  # [B, 1, F]
-                        relevance = F.adaptive_avg_pool1d(relevance, target_channels)  # [B, 1, C]
-                        relevance = relevance.squeeze(1)  # [B, C]
-                    
-                    # Now broadcast spatially (no interpolation, just expand)
-                    relevance = relevance.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
-                    relevance = relevance.expand(batch_size, target_channels, target_height, target_width)
-                else:
-                    # Fewer features than channels - this is the classifier case
-                    # FC layer (e.g., 1000 classes) -> needs to map back to conv features
-                    # 
-                    # Strategy: Uniformly distribute relevance across all channels and spatial locations
-                    # Each channel/location gets equal share of the total relevance
-                    total_relevance = relevance.sum(dim=1, keepdim=True)  # [B, 1]
-                    
-                    # Distribute uniformly: divide by number of output elements
-                    num_output_elements = target_channels * target_spatial_size
-                    relevance_per_element = total_relevance / num_output_elements
-                    
-                    # Broadcast to target shape
-                    relevance = relevance_per_element.view(batch_size, 1, 1, 1)
-                    relevance = relevance.expand(batch_size, target_channels, target_height, target_width)
-        
-        # If relevance is 3D, add channel dimension
-        elif relevance.dim() == 3:
-            # Assume [batch, height, width] -> [batch, 1, height, width]
-            relevance = relevance.unsqueeze(1)
-            if relevance.shape != target_shape:
-                # Interpolate to match target spatial size
-                relevance = F.interpolate(
-                    relevance,
-                    size=(target_shape[2], target_shape[3]),
-                    mode='bilinear',
-                    align_corners=False
-                )
-                # Expand channels if needed
-                if relevance.shape[1] != target_shape[1]:
-                    relevance = relevance.expand(-1, target_shape[1], -1, -1)
-        
-        # If relevance is 4D but doesn't match target shape
-        elif relevance.dim() == 4:
-            if relevance.shape != target_shape:
-                # Handle channel dimension mismatch first
-                if relevance.shape[1] != target_shape[1]:
-                    # Average across existing channels, then broadcast
-                    relevance = relevance.mean(dim=1, keepdim=True)  # [B, 1, H, W]
-                    relevance = relevance.expand(-1, target_shape[1], -1, -1)  # [B, C, H, W]
-                
-                # Then interpolate spatial dimensions if needed and if we have actual spatial dims
-                if (relevance.shape[2], relevance.shape[3]) != (target_shape[2], target_shape[3]):
-                    # Only interpolate if both spatial dims are > 1
-                    if relevance.shape[2] > 1 and relevance.shape[3] > 1:
-                        relevance = F.interpolate(
-                            relevance,
-                            size=(target_shape[2], target_shape[3]),
-                            mode='bilinear',
-                            align_corners=False
-                        )
-                    else:
-                        # Degenerate spatial dims - just expand
-                        relevance = relevance.expand(-1, -1, target_shape[2], target_shape[3])
-        
-        return relevance
+        return self._split_relevance_to_features(current_relevance, input_embeddings)
 
     def _lrp_linear(
         self,
@@ -909,8 +666,6 @@ class LayerWiseRelevancePropagation:
 
         Formula: R_i = Σ_j (z_ij / (z_j + ε·sign(z_j))) · R_j
 
-        where z_ij = w_ij * x_i and z_j = Σ_k w_kj * x_k + b_j
-
         Args:
             module: The linear layer.
             activation_info: Stored activations.
@@ -919,48 +674,25 @@ class LayerWiseRelevancePropagation:
         Returns:
             Relevance for previous layer.
         """
-        # Get input activations
         x = activation_info["input"]
         if isinstance(x, tuple):
             x = x[0]
-
-        # Ensure x is 2D [batch, features]
         if x.dim() > 2:
-            batch_size = x.size(0)
-            x = x.view(batch_size, -1)
+            x = x.view(x.size(0), -1)
 
-        # Get weights and bias
-        W = module.weight  # [out_features, in_features]
-        b = module.bias  # Keep as None if no bias
+        W = module.weight
+        b = module.bias
 
-        # Compute z_j = W @ x^T + b
-        z = F.linear(x, W, b)  # [batch, out_features]
+        # Forward pass with stabilization
+        z = F.linear(x, W, b)
+        z = z + self.epsilon * torch.sign(z)
+        z = torch.where(torch.abs(z) < 1e-9, torch.ones_like(z) * 1e-9, z)
 
-        # Add stabilizer to prevent division by zero
-        z_stabilized = z + self.epsilon * torch.sign(z)
-        z_stabilized = torch.where(
-            torch.abs(z_stabilized) < 1e-9,
-            torch.ones_like(z_stabilized) * 1e-9,
-            z_stabilized,
-        )
-
-        # Compute relevance for each input
-        # R_i = Σ_j (w_ij * x_i / z_j) * R_j
-        # Reshape for broadcasting
-        x_expanded = x.unsqueeze(2)  # [batch, in_features, 1]
-        W_expanded = W.t().unsqueeze(0)  # [1, in_features, out_features]
-        z_expanded = z_stabilized.unsqueeze(1)  # [batch, 1, out_features]
-        R_expanded = relevance_output.unsqueeze(1)  # [batch, 1, out_features]
-
-        # Compute z_ij = w_ij * x_i
-        z_ij = x_expanded * W_expanded  # [batch, in_features, out_features]
-
-        # Compute relevance redistribution
-        relevance_input = ((z_ij / z_expanded) * R_expanded).sum(
-            dim=2
-        )  # [batch, in_features]
-
-        return relevance_input
+        # Compute relevance using einsum for clarity
+        # z_ij = x_i * w_ji, R_i = sum_j (z_ij / z_j) * R_j
+        s = relevance_output / z  # [batch, out_features]
+        c = torch.einsum('bo,oi->bi', s, W)  # [batch, in_features]
+        return x * c
 
     def _lrp_linear_alphabeta(
         self,
@@ -972,9 +704,6 @@ class LayerWiseRelevancePropagation:
 
         Formula: R_i = Σ_j [(α·z_ij^+ / z_j^+) - (β·z_ij^- / z_j^-)] · R_j
 
-        This rule separates positive and negative contributions.
-        Common setting: α=1, β=0 (ignore negative contributions).
-
         Args:
             module: The linear layer.
             activation_info: Stored activations.
@@ -983,64 +712,32 @@ class LayerWiseRelevancePropagation:
         Returns:
             Relevance for previous layer.
         """
-        # Get input activations
         x = activation_info["input"]
         if isinstance(x, tuple):
             x = x[0]
-
-        # Ensure x is 2D
         if x.dim() > 2:
-            batch_size = x.size(0)
-            x = x.view(batch_size, -1)
+            x = x.view(x.size(0), -1)
 
-        # Get weights and bias
         W = module.weight
-        b = module.bias  # Keep as None if no bias
+        b = module.bias
 
-        # Separate positive and negative weights
+        # Separate positive and negative components
         W_pos = torch.clamp(W, min=0)
         W_neg = torch.clamp(W, max=0)
+        b_pos = torch.clamp(b, min=0) if b is not None else None
+        b_neg = torch.clamp(b, max=0) if b is not None else None
 
-        # Separate positive and negative bias
-        if b is not None:
-            b_pos = torch.clamp(b, min=0)
-            b_neg = torch.clamp(b, max=0)
-        else:
-            b_pos = None
-            b_neg = None
+        # Forward passes
+        z_pos = F.linear(x, W_pos, b_pos) + 1e-9
+        z_neg = F.linear(x, W_neg, b_neg) - 1e-9
 
-        # Compute positive and negative forward passes
-        z_pos = F.linear(x, W_pos, b_pos)  # [batch, out_features]
-        z_neg = F.linear(x, W_neg, b_neg)  # [batch, out_features]
+        # Backward passes using einsum
+        s_pos = relevance_output / z_pos
+        s_neg = relevance_output / z_neg
+        c_pos = torch.einsum('bo,oi->bi', s_pos, W_pos)
+        c_neg = torch.einsum('bo,oi->bi', s_neg, W_neg)
 
-        # Add small epsilon to avoid division by zero
-        eps = 1e-9
-        z_pos = torch.where(
-            torch.abs(z_pos) < eps, torch.ones_like(z_pos) * eps, z_pos
-        )
-        z_neg = torch.where(
-            torch.abs(z_neg) < eps, torch.ones_like(z_neg) * eps, z_neg
-        )
-
-        # Expand for broadcasting
-        x_expanded = x.unsqueeze(2)  # [batch, in_features, 1]
-        W_pos_expanded = W_pos.t().unsqueeze(0)  # [1, in_features, out_features]
-        W_neg_expanded = W_neg.t().unsqueeze(0)  # [1, in_features, out_features]
-        z_pos_expanded = z_pos.unsqueeze(1)  # [batch, 1, out_features]
-        z_neg_expanded = z_neg.unsqueeze(1)  # [batch, 1, out_features]
-        R_expanded = relevance_output.unsqueeze(1)  # [batch, 1, out_features]
-
-        # Compute positive and negative contributions
-        z_ij_pos = x_expanded * W_pos_expanded
-        z_ij_neg = x_expanded * W_neg_expanded
-
-        # Compute relevance
-        relevance_pos = ((z_ij_pos / z_pos_expanded) * R_expanded).sum(dim=2)
-        relevance_neg = ((z_ij_neg / z_neg_expanded) * R_expanded).sum(dim=2)
-
-        relevance_input = self.alpha * relevance_pos - self.beta * relevance_neg
-
-        return relevance_input
+        return self.alpha * (x * c_pos) - self.beta * (x * c_neg)
 
     def _lrp_relu(
         self, activation_info: dict, relevance_output: torch.Tensor
@@ -1107,53 +804,46 @@ class LayerWiseRelevancePropagation:
             x = x[0]
         
         # Get layer parameters
-        W = module.weight  # [out_channels, in_channels, kh, kw]
-        b = module.bias  # Keep as None if no bias
+        W = module.weight
+        b = module.bias
         
-        # Forward pass to get activations
-        z = F.conv2d(
-            x, W, b,
-            stride=module.stride,
-            padding=module.padding,
-            dilation=module.dilation,
-            groups=module.groups
-        )
+        # Forward pass with stabilization
+        z = F.conv2d(x, W, b, stride=module.stride, padding=module.padding,
+                     dilation=module.dilation, groups=module.groups)
+        z = z + self.epsilon * torch.sign(z)
         
-        # Add epsilon for stability
-        z = z + self.epsilon * torch.where(z >= 0, torch.ones_like(z), -torch.ones_like(z))
-        
-        # Compute relevance using transposed convolution
-        # R_i = sum_j (a_i * w_ij / z_j * R_j)
+        # Backward pass
         s = relevance_output / z
         
-        # Calculate output_padding to match input size
-        output_padding = 0
-        if module.stride != 1:
-            output_padding = (x.shape[2] - ((z.shape[2] - 1) * module.stride[0] + 1 - 2 * module.padding[0])) % module.stride[0] if isinstance(module.stride, tuple) else \
-                            (x.shape[2] - ((z.shape[2] - 1) * module.stride + 1 - 2 * module.padding)) % module.stride
+        # Calculate output_padding to match input shape
+        output_padding = []
+        for i in range(2):  # H and W dimensions
+            stride = module.stride[i] if isinstance(module.stride, tuple) else module.stride
+            padding = module.padding[i] if isinstance(module.padding, tuple) else module.padding
+            dilation = module.dilation[i] if isinstance(module.dilation, tuple) else module.dilation
+            kernel_size = W.shape[2 + i]
+            
+            # Expected output size from conv_transpose2d
+            expected = (z.shape[2 + i] - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + 1
+            actual = x.shape[2 + i]
+            output_padding.append(max(0, actual - expected))
         
-        # Propagate back through convolution
-        c = F.conv_transpose2d(
-            s, W,
-            stride=module.stride,
-            padding=module.padding,
-            output_padding=output_padding,
-            dilation=module.dilation,
-            groups=module.groups
-        )
+        c = F.conv_transpose2d(s, W, stride=module.stride, padding=module.padding,
+                               output_padding=tuple(output_padding),
+                               dilation=module.dilation, groups=module.groups)
         
-        print(f"DEBUG _lrp_conv2d_epsilon: x.shape = {x.shape}, z.shape = {z.shape}")
-        print(f"DEBUG _lrp_conv2d_epsilon: s.shape = {s.shape}, c.shape = {c.shape}")
-        print(f"DEBUG _lrp_conv2d_epsilon: stride={module.stride}, padding={module.padding}, output_padding={output_padding}")
+        # Ensure exact shape match by cropping or padding
+        if c.shape[2:] != x.shape[2:]:
+            # Crop if c is larger
+            if c.shape[2] > x.shape[2] or c.shape[3] > x.shape[3]:
+                c = c[:, :, :x.shape[2], :x.shape[3]]
+            # Pad if c is smaller
+            elif c.shape[2] < x.shape[2] or c.shape[3] < x.shape[3]:
+                pad_h = x.shape[2] - c.shape[2]
+                pad_w = x.shape[3] - c.shape[3]
+                c = F.pad(c, (0, pad_w, 0, pad_h))
         
-        # Ensure c matches x's spatial dimensions
-        if c.shape != x.shape:
-            print(f"DEBUG _lrp_conv2d_epsilon: Cropping c from {c.shape} to match x {x.shape}")
-            c = c[:, :, :x.shape[2], :x.shape[3]]
-        
-        relevance_input = x * c
-        print(f"DEBUG _lrp_conv2d_epsilon RETURNING: relevance_input.shape = {relevance_input.shape}")
-        return relevance_input
+        return x * c
 
     def _lrp_conv2d_alphabeta(
         self,
@@ -1207,18 +897,33 @@ class LayerWiseRelevancePropagation:
             groups=module.groups
         )
         
-        # Stabilize
-        z_pos = z_pos + self.epsilon
-        z_neg = z_neg - self.epsilon
+        # Combine for total forward pass and stabilize
+        z_total = z_pos + z_neg
+        z_total = z_total + self.epsilon * torch.sign(z_total)
         
-        # Backward passes
-        s_pos = relevance_output / z_pos
-        s_neg = relevance_output / z_neg
+        # Backward passes - distribute relevance proportionally
+        s = relevance_output / z_total
+        s_pos = s
+        s_neg = s
+        
+        # Calculate output_padding to match input shape
+        output_padding = []
+        for i in range(2):  # H and W dimensions
+            stride = module.stride[i] if isinstance(module.stride, tuple) else module.stride
+            padding = module.padding[i] if isinstance(module.padding, tuple) else module.padding
+            dilation = module.dilation[i] if isinstance(module.dilation, tuple) else module.dilation
+            kernel_size = W_pos.shape[2 + i]
+            
+            # Expected output size from conv_transpose2d
+            expected = (z_pos.shape[2 + i] - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + 1
+            actual = x.shape[2 + i]
+            output_padding.append(max(0, actual - expected))
         
         c_pos = F.conv_transpose2d(
             s_pos, W_pos,
             stride=module.stride,
             padding=module.padding,
+            output_padding=tuple(output_padding),
             dilation=module.dilation,
             groups=module.groups
         )
@@ -1226,11 +931,27 @@ class LayerWiseRelevancePropagation:
             s_neg, W_neg,
             stride=module.stride,
             padding=module.padding,
+            output_padding=tuple(output_padding),
             dilation=module.dilation,
             groups=module.groups
         )
         
-        relevance_input = self.alpha * (x * c_pos) - self.beta * (x * c_neg)
+        # Ensure exact shape match by cropping or padding
+        if c_pos.shape[2:] != x.shape[2:]:
+            # Crop if c is larger
+            if c_pos.shape[2] > x.shape[2] or c_pos.shape[3] > x.shape[3]:
+                c_pos = c_pos[:, :, :x.shape[2], :x.shape[3]]
+                c_neg = c_neg[:, :, :x.shape[2], :x.shape[3]]
+            # Pad if c is smaller
+            elif c_pos.shape[2] < x.shape[2] or c_pos.shape[3] < x.shape[3]:
+                pad_h = x.shape[2] - c_pos.shape[2]
+                pad_w = x.shape[3] - c_pos.shape[3]
+                c_pos = F.pad(c_pos, (0, pad_w, 0, pad_h))
+                c_neg = F.pad(c_neg, (0, pad_w, 0, pad_h))
+        
+        # Apply alpha-beta weighting: positive contributions get alpha, negative get beta
+        # Multiply by input x to get element-wise relevance (same pattern as epsilon rule)
+        relevance_input = x * (self.alpha * c_pos + self.beta * c_neg)
         return relevance_input
 
     def _lrp_maxpool2d(
@@ -1338,9 +1059,7 @@ class LayerWiseRelevancePropagation:
         activation_info: dict,
         relevance_output: torch.Tensor,
     ) -> torch.Tensor:
-        """LRP for BatchNorm2d.
-
-        Batch normalization is typically treated as a linear transformation for LRP.
+        """LRP for BatchNorm2d - pass through with scaling.
 
         Args:
             module: The BatchNorm2d layer.
@@ -1350,43 +1069,10 @@ class LayerWiseRelevancePropagation:
         Returns:
             Relevance for input to this layer.
         """
-        # BatchNorm can be seen as: y = gamma * (x - mean) / std + beta
-        # For LRP, we treat it as a scaling operation and pass relevance through
-        # proportional to the scaling factors
-        
-        x = activation_info["input"]
-        if isinstance(x, tuple):
-            x = x[0]
-        
-        print(f"DEBUG _lrp_batchnorm2d: x.shape = {x.shape}, relevance_output.shape = {relevance_output.shape}")
-        
-        # In eval mode, running stats are used
-        if module.training:
-            # Use batch statistics
-            mean = x.mean(dim=[0, 2, 3], keepdim=True)
-            var = x.var(dim=[0, 2, 3], keepdim=True, unbiased=False)
-        else:
-            # Use running statistics
-            mean = module.running_mean.view(1, -1, 1, 1)
-            var = module.running_var.view(1, -1, 1, 1)
-        
-        # Compute the scaling factor
-        std = torch.sqrt(var + module.eps)
-        gamma = module.weight.view(1, -1, 1, 1) if module.weight is not None else 1
-        
-        # Normalize input
-        x_normalized = (x - mean) / std
-        
-        # Forward pass
-        z = gamma * x_normalized
-        
-        # Add epsilon for stability
-        z = z + self.epsilon * torch.where(z >= 0, torch.ones_like(z), -torch.ones_like(z))
-        
-        # Propagate relevance: R_i = (x_i / sum(x_i)) * R_out
-        relevance_input = (x_normalized / z) * relevance_output * gamma
-        
-        return relevance_input
+        # Simplified: pass relevance through with gamma scaling
+        # BatchNorm is treated as a linear scaling in eval mode
+        gamma = module.weight.view(1, -1, 1, 1) if module.weight is not None else 1.0
+        return relevance_output * gamma
 
     def _lrp_rnn(
         self,
@@ -1428,46 +1114,6 @@ class LayerWiseRelevancePropagation:
         else:
             return relevance_output
 
-    def _split_relevance_for_branches(
-        self,
-        relevance: torch.Tensor,
-        input_embeddings: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
-        """Split relevance from concatenated layer to individual feature branches.
-        
-        When multiple features are processed in parallel and then concatenated
-        (as in PyHealth MLP), we need to split the relevance proportionally
-        back to each branch.
-        
-        Args:
-            relevance: Relevance tensor from concatenated layer [batch, total_hidden_dim]
-            input_embeddings: Dictionary of embeddings for each feature
-            
-        Returns:
-            Dictionary mapping feature keys to their relevance tensors
-        """
-        branch_relevances = {}
-        
-        if not self.branch_info:
-            # No branching detected, return as-is
-            return self._split_relevance_to_features(relevance, input_embeddings)
-        
-        # Split relevance based on hidden dimensions of each branch
-        # In MLP, each feature gets hidden_dim outputs that are concatenated
-        offset = 0
-        for feature_key in self.model.feature_keys:
-            if feature_key in self.branch_info:
-                hidden_dim = self.branch_info[feature_key]['hidden_dim']
-                if hidden_dim is None:
-                    # Fallback: equal split
-                    hidden_dim = relevance.shape[-1] // len(self.model.feature_keys)
-                
-                # Extract this branch's portion of relevance
-                branch_relevances[feature_key] = relevance[..., offset:offset + hidden_dim]
-                offset += hidden_dim
-        
-        return branch_relevances
-    
     def _split_relevance_to_features(
         self,
         relevance: torch.Tensor,
@@ -1525,3 +1171,308 @@ class LayerWiseRelevancePropagation:
                 relevance_by_feature[key] = relevance
 
         return relevance_by_feature
+
+
+# ============================================================================
+# Unified LRP Implementation
+# ============================================================================
+
+
+class UnifiedLRP:
+    """Unified Layer-wise Relevance Propagation for CNNs and embedding-based models.
+    
+    This class automatically detects layer types and applies appropriate
+    LRP rules using a modular handler system. Supports:
+    
+    - **CNNs**: Conv2d, pooling, batch norm, skip connections
+    - **Embedding models**: Linear, LSTM, GRU with embeddings
+    - **Mixed models**: Multimodal architectures with both images and codes
+    
+    The implementation ensures relevance conservation at each layer and
+    provides comprehensive debugging tools.
+    
+    Args:
+        model: PyTorch model to interpret (can be any nn.Module)
+        rule: LRP propagation rule ('epsilon' or 'alphabeta')
+        epsilon: Stabilization parameter for epsilon rule (default: 0.01)
+        alpha: Positive contribution weight for alphabeta rule (default: 2.0)
+        beta: Negative contribution weight for alphabeta rule (default: 1.0)
+        validate_conservation: If True, check conservation at each layer (default: True)
+        conservation_tolerance: Maximum allowed conservation error (default: 0.01 = 1%)
+        
+    Examples:
+        >>> # For CNN models (images)
+        >>> from pyhealth.models import TorchvisionModel
+        >>> model = TorchvisionModel(dataset, model_name="resnet18")
+        >>> lrp = UnifiedLRP(model, rule='epsilon', epsilon=0.01)
+        >>> 
+        >>> # Compute attributions
+        >>> attributions = lrp.attribute(
+        ...     inputs={'image': chest_xray},
+        ...     target_class=0
+        ... )
+        >>> 
+        >>> # For embedding-based models
+        >>> from pyhealth.models import RNN
+        >>> model = RNN(dataset, feature_keys=['conditions'])
+        >>> lrp = UnifiedLRP(model, rule='epsilon')
+        >>> 
+        >>> attributions = lrp.attribute(
+        ...     inputs={'conditions': patient_codes},
+        ...     target_class=1
+        ... )
+    """
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        rule: str = "epsilon",
+        epsilon: float = 0.01,
+        alpha: float = 2.0,
+        beta: float = 1.0,
+        validate_conservation: bool = True,
+        conservation_tolerance: float = 0.01,
+        custom_registry: Optional = None
+    ):
+        """Initialize UnifiedLRP.
+        
+        Args:
+            model: Model to interpret
+            rule: LRP rule ('epsilon', 'alphabeta')
+            epsilon: Stabilization parameter
+            alpha: Alpha parameter for alphabeta rule
+            beta: Beta parameter for alphabeta rule
+            validate_conservation: Whether to validate conservation property
+            conservation_tolerance: Maximum allowed conservation error (fraction)
+            custom_registry: Optional custom handler registry (uses default if None)
+        """
+        from .lrp_base import create_default_registry, ConservationValidator
+        
+        self.model = model
+        self.model.eval()
+        
+        self.rule = rule
+        self.epsilon = epsilon
+        self.alpha = alpha
+        self.beta = beta
+        
+        self.registry = custom_registry if custom_registry else create_default_registry()
+        
+        self.validate_conservation = validate_conservation
+        self.validator = ConservationValidator(
+            tolerance=conservation_tolerance,
+            strict=False
+        )
+        
+        self.hooks = []
+        self.layer_order = []
+    
+    def attribute(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        target_class: Optional[int] = None,
+        return_intermediates: bool = False,
+        **kwargs
+    ) -> Dict[str, torch.Tensor]:
+        """Compute LRP attributions for given inputs.
+        
+        This is the main entry point for computing attributions. The method:
+        1. Detects relevant layers and registers hooks
+        2. Performs forward pass to capture activations
+        3. Initializes relevance at output layer
+        4. Propagates relevance backward through layers
+        5. Returns relevance at input layer(s)
+        
+        Args:
+            inputs: Dictionary of input tensors, e.g.:
+                - {'image': torch.Tensor} for CNNs
+                - {'conditions': torch.Tensor} for embedding models
+                - Multiple keys for multimodal models
+            target_class: Class index to explain (None = predicted class)
+            return_intermediates: If True, return relevance at all layers
+            **kwargs: Additional arguments passed to model forward
+            
+        Returns:
+            Dictionary mapping input keys to relevance tensors
+                
+        Raises:
+            RuntimeError: If model forward pass fails
+            ValueError: If inputs are invalid
+        """
+        from .lrp_base import check_tensor_validity
+        
+        if not inputs:
+            raise ValueError("inputs dictionary cannot be empty")
+        
+        for key, tensor in inputs.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise ValueError(f"Input '{key}' must be a torch.Tensor")
+            check_tensor_validity(tensor, f"input[{key}]")
+        
+        device = next(self.model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        if self.validate_conservation:
+            self.validator.reset()
+        
+        try:
+            self._register_hooks()
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs, **kwargs)
+            
+            logits = self._extract_logits(outputs)
+            
+            if target_class is None:
+                target_class = torch.argmax(logits, dim=-1)
+            
+            output_relevance = self._initialize_output_relevance(
+                logits, target_class
+            )
+            
+            input_relevances = self._propagate_backward(
+                output_relevance,
+                inputs,
+                return_intermediates
+            )
+            
+            if self.validate_conservation:
+                self.validator.print_summary()
+            
+            return input_relevances
+            
+        finally:
+            self._remove_hooks()
+    
+    def _register_hooks(self):
+        """Register forward hooks on all supported layers."""
+        self.layer_order.clear()
+        
+        for name, module in self.model.named_modules():
+            handler = self.registry.get_handler(module)
+            
+            if handler is not None:
+                def create_hook(handler_ref, module_ref, name_ref):
+                    def hook(module, input, output):
+                        handler_ref.forward_hook(module, input, output)
+                    return hook
+                
+                handle = module.register_forward_hook(
+                    create_hook(handler, module, name)
+                )
+                self.hooks.append(handle)
+                self.layer_order.append((name, module, handler))
+    
+    def _remove_hooks(self):
+        """Remove all registered hooks and clear caches."""
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks.clear()
+        
+        for _, _, handler in self.layer_order:
+            handler.clear_cache()
+        
+        self.layer_order.clear()
+    
+    def _extract_logits(self, outputs) -> torch.Tensor:
+        """Extract logits from model output."""
+        if isinstance(outputs, dict):
+            if 'logit' in outputs:
+                return outputs['logit']
+            elif 'y_prob' in outputs:
+                return torch.log(outputs['y_prob'] + 1e-10)
+            elif 'y_pred' in outputs:
+                return outputs['y_pred']
+            else:
+                raise ValueError(
+                    f"Cannot extract logits from output keys: {outputs.keys()}"
+                )
+        elif isinstance(outputs, torch.Tensor):
+            return outputs
+        else:
+            raise ValueError(f"Unsupported output type: {type(outputs)}")
+    
+    def _initialize_output_relevance(
+        self,
+        logits: torch.Tensor,
+        target_class
+    ) -> torch.Tensor:
+        """Initialize relevance at the output layer."""
+        batch_size = logits.size(0)
+        
+        if logits.dim() == 2 and logits.size(-1) > 1:
+            output_relevance = torch.zeros_like(logits)
+            
+            # Convert target_class to tensor if needed
+            if isinstance(target_class, int):
+                target_class = torch.tensor([target_class] * batch_size)
+            elif isinstance(target_class, torch.Tensor):
+                if target_class.dim() == 0:
+                    target_class = target_class.unsqueeze(0).expand(batch_size)
+            
+            for i in range(batch_size):
+                output_relevance[i, target_class[i]] = logits[i, target_class[i]]
+        else:
+            output_relevance = logits
+        
+        return output_relevance
+    
+    def _propagate_backward(
+        self,
+        output_relevance: torch.Tensor,
+        inputs: Dict[str, torch.Tensor],
+        return_intermediates: bool = False
+    ) -> Dict[str, torch.Tensor]:
+        """Propagate relevance backward through all layers."""
+        from .lrp_base import check_tensor_validity
+        
+        current_relevance = output_relevance
+        intermediate_relevances = {}
+        
+        for name, module, handler in reversed(self.layer_order):
+            prev_relevance = handler.backward_relevance(
+                layer=module,
+                relevance_output=current_relevance,
+                rule=self.rule,
+                epsilon=self.epsilon,
+                alpha=self.alpha,
+                beta=self.beta
+            )
+            
+            if self.validate_conservation:
+                self.validator.validate(
+                    layer_name=name,
+                    relevance_input=prev_relevance,
+                    relevance_output=current_relevance,
+                    layer_type=type(module).__name__
+                )
+            
+            if return_intermediates:
+                intermediate_relevances[name] = prev_relevance.detach().clone()
+            
+            current_relevance = prev_relevance
+            check_tensor_validity(current_relevance, f"relevance after {name}")
+        
+        input_relevances = self._map_to_inputs(current_relevance, inputs)
+        
+        if return_intermediates:
+            input_relevances['_intermediates'] = intermediate_relevances
+        
+        return input_relevances
+    
+    def _map_to_inputs(
+        self,
+        relevance: torch.Tensor,
+        inputs: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Map final relevance tensor back to input structure."""
+        if len(inputs) == 1:
+            key = list(inputs.keys())[0]
+            return {key: relevance}
+        
+        # Multi-input case
+        return {key: relevance for key in inputs.keys()}
+    
+    def get_conservation_summary(self) -> Dict:
+        """Get conservation validation summary."""
+        return self.validator.get_summary()
