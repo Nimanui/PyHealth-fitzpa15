@@ -783,6 +783,9 @@ class Conv2dLRPHandler(LRPLayerHandler):
         cache = self.activations_cache[module_id]
         x = cache['input']
         
+        print(f"[Conv2d] Received relevance_output shape: {relevance_output.shape}")
+        print(f"[Conv2d] Cached input x shape: {x.shape}")
+        
         check_tensor_validity(x, "Conv2d input")
         check_tensor_validity(relevance_output, "Conv2d relevance_output")
         
@@ -1184,12 +1187,17 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
         input_shape = input_tensor.shape
         output_shape = cache['output'].shape
         
+        print(f"[AdaptiveAvgPool2d] Received relevance_output shape: {relevance_output.shape}")
+        print(f"[AdaptiveAvgPool2d] Cached input shape: {input_shape}")
+        print(f"[AdaptiveAvgPool2d] Cached output shape: {output_shape}")
+        
         # Handle case where relevance is 2D (flattened) instead of 4D
         # This happens in ResNet where torch.flatten() is used functionally
         if relevance_output.dim() == 2 and len(output_shape) == 4:
             # Reshape from [batch, channels] to [batch, channels, 1, 1]
             batch_size, channels = relevance_output.shape
             relevance_output = relevance_output.view(batch_size, channels, 1, 1)
+            print(f"[AdaptiveAvgPool2d] Reshaped to 4D: {relevance_output.shape}")
         
         # For AdaptiveAvgPool2d, distribute relevance uniformly
         # Direct approach: create a tensor with exact input dimensions
@@ -1229,6 +1237,8 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
             relevance_input, relevance_output,
             tolerance=0.5, layer_name="AdaptiveAvgPool2d"
         )
+        
+        print(f"[AdaptiveAvgPool2d] Produced relevance_input shape: {relevance_input.shape}")
         
         return relevance_input
 
