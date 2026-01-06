@@ -958,18 +958,33 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
             raise RuntimeError("forward_hook not called for MaxPool2d layer")
         
         cache = self.activations_cache[module_id]
-        input_shape = cache['input'].shape
+        input_tensor = cache['input']
+        input_shape = input_tensor.shape
         indices = cache['indices']
         
+        print(f"[MaxPool2d] Relevance output shape: {relevance_output.shape}")
+        print(f"[MaxPool2d] Input shape: {input_shape}")
+        print(f"[MaxPool2d] Indices shape: {indices.shape}")
+        
         # Unpool: distribute relevance to winning positions
-        relevance_input = F.max_unpool2d(
-            relevance_output,
-            indices,
-            kernel_size=layer.kernel_size,
-            stride=layer.stride,
-            padding=layer.padding,
-            output_size=input_shape
-        )
+        try:
+            relevance_input = F.max_unpool2d(
+                relevance_output,
+                indices,
+                kernel_size=layer.kernel_size,
+                stride=layer.stride,
+                padding=layer.padding,
+                output_size=input_shape
+            )
+        except RuntimeError as e:
+            # If max_unpool2d fails, fall back to uniform distribution
+            print(f"[MaxPool2d] max_unpool2d failed: {e}")
+            print(f"[MaxPool2d] Falling back to uniform distribution")
+            relevance_input = F.interpolate(
+                relevance_output,
+                size=(input_shape[2], input_shape[3]),
+                mode='nearest'
+            )
         
         self.validate_conservation(
             relevance_input, relevance_output,
