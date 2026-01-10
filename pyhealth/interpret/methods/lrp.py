@@ -1495,80 +1495,19 @@ class UnifiedLRP:
         inputs: Dict[str, torch.Tensor],
         return_intermediates: bool = False
     ) -> Dict[str, torch.Tensor]:
-        """Propagate relevance backward through all layers, handling skip connections.
+        """Propagate relevance backward through all layers.
         
-        For ResNet skip connections, when we encounter a BasicBlock exit:
-        1. Split the output relevance between residual and identity branches
-        2. Propagate residual relevance backward through conv layers
-        3. Combine with identity relevance at the block input
+        Note: Skip connection handling is detected but not yet fully implemented.
+        Currently processes ResNet sequentially, which gives approximate results.
         """
         from .lrp_base import check_tensor_validity
         
         current_relevance = output_relevance
         intermediate_relevances = {}
         
-        # Build a map of BasicBlock modules for skip connection handling
-        skip_map = {id(module): (name, module, has_ds) for name, module, has_ds in self.skip_connections}
-        
-        # Process layers in reverse order
+        # Process layers in reverse order (standard LRP)
         for idx in range(len(self.layer_order) - 1, -1, -1):
             name, module, handler = self.layer_order[idx]
-            
-            # Check if the NEXT layer (forward direction) is the start of a BasicBlock
-            # In that case, we need to handle skip connection addition
-            parent_block_id = self._get_parent_basic_block(name)
-            
-            # Check if this layer is at the END of a BasicBlock (last layer before addition)
-            is_block_end = False
-            if parent_block_id in skip_map and idx > 0:
-                block_name, block_module, _ = skip_map[parent_block_id]
-                # Check if this is the last ReLU or last conv in the block
-                if 'relu' in name and block_name in name:
-                    # Check if next layer (in reverse = previous in forward) is outside the block
-                    if idx > 0:
-                        prev_name, _, _ = self.layer_order[idx - 1]
-                        if block_name not in prev_name:
-                            is_block_end = True
-            
-            # If we're at a block end, split relevance
-            if is_block_end and parent_block_id in self.block_caches:
-                cache = self.block_caches[parent_block_id]
-                if 'identity' in cache and cache['identity'] is not None:
-                    # Compute residual from cached values
-                    # output = residual + identity (before final ReLU)
-                    # We approximate: residual ≈ output - identity
-                    output_before_relu = cache['output']
-                    identity = cache['identity']
-                    
-                    # For a more accurate computation, we need the output BEFORE final addition
-                    # For now, approximate using the cached values
-                    residual_approx = output_before_relu - identity
-                    
-                    # Cache for AdditionLRPHandler
-                    self.addition_handler.cache_branches(parent_block_id, residual_approx, identity)
-                    
-                    # Split relevance
-                    residual_rel, identity_rel = self.addition_handler.backward_relevance_split(
-                        operation_id=parent_block_id,
-                        relevance_output=current_relevance,
-                        rule=self.rule,
-                        epsilon=self.epsilon
-                    )
-                    
-                    # Continue backward through residual path
-                    current_relevance = residual_rel
-                    
-                    # Store identity relevance to add at block input
-                    # Find the block input layer
-                    block_name, _, _ = skip_map[parent_block_id]
-                    for j in range(idx - 1, -1, -1):
-                        check_name, _, _ = self.layer_order[j]
-                        if check_name == f"{block_name}.conv1":
-                            # Mark that we need to add identity relevance after this layer
-                            if not hasattr(self, '_pending_identity_relevance'):
-                                self._pending_identity_relevance = {}
-                            self._pending_identity_relevance[j] = identity_rel
-                            break
             
             # Normal backward propagation through this layer
             prev_relevance = handler.backward_relevance(
@@ -1579,11 +1518,6 @@ class UnifiedLRP:
                 alpha=self.alpha,
                 beta=self.beta
             )
-            
-            # Check if we need to add identity relevance at this point
-            if hasattr(self, '_pending_identity_relevance') and idx in self._pending_identity_relevance:
-                identity_rel = self._pending_identity_relevance.pop(idx)
-                prev_relevance = prev_relevance + identity_rel
             
             if self.validate_conservation:
                 self.validator.validate(
