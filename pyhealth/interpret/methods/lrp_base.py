@@ -783,9 +783,6 @@ class Conv2dLRPHandler(LRPLayerHandler):
         cache = self.activations_cache[module_id]
         x = cache['input']
         
-        print(f"[Conv2d] Received relevance_output shape: {relevance_output.shape}")
-        print(f"[Conv2d] Cached input x shape: {x.shape}")
-        
         check_tensor_validity(x, "Conv2d input")
         check_tensor_validity(relevance_output, "Conv2d relevance_output")
         
@@ -965,7 +962,6 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
         print(f"[MaxPool2d] Relevance output shape: {relevance_output.shape}")
         print(f"[MaxPool2d] Input shape: {input_shape}")
         print(f"[MaxPool2d] Indices shape: {indices.shape}")
-        
         # Unpool: distribute relevance to winning positions
         try:
             relevance_input = F.max_unpool2d(
@@ -976,13 +972,8 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
                 padding=layer.padding,
                 output_size=input_shape
             )
-        except RuntimeError as e:
+        except RuntimeError:
             # If max_unpool2d fails, fall back to uniform distribution
-            print(f"[MaxPool2d] max_unpool2d failed: {e}")
-            print(f"[MaxPool2d] Falling back to uniform distribution")
-            relevance_input = F.interpolate(
-                relevance_output,
-                size=(input_shape[2], input_shape[3]),
                 mode='nearest'
             )
         
@@ -1202,17 +1193,12 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
         input_shape = input_tensor.shape
         output_shape = cache['output'].shape
         
-        print(f"[AdaptiveAvgPool2d] Received relevance_output shape: {relevance_output.shape}")
-        print(f"[AdaptiveAvgPool2d] Cached input shape: {input_shape}")
-        print(f"[AdaptiveAvgPool2d] Cached output shape: {output_shape}")
-        
         # Handle case where relevance is 2D (flattened) instead of 4D
         # This happens when a Flatten layer follows this pooling layer
         if relevance_output.dim() == 2 and len(output_shape) == 4:
             # Reshape to match the cached output shape
             # E.g., [1, 25088] -> [1, 512, 7, 7] where 25088 = 512 * 7 * 7
             relevance_output = relevance_output.view(output_shape)
-            print(f"[AdaptiveAvgPool2d] Reshaped from 2D to 4D: {relevance_output.shape}")
         
         # For AdaptiveAvgPool2d, distribute relevance uniformly
         # Direct approach: create a tensor with exact input dimensions
@@ -1252,8 +1238,6 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
             relevance_input, relevance_output,
             tolerance=0.5, layer_name="AdaptiveAvgPool2d"
         )
-        
-        print(f"[AdaptiveAvgPool2d] Produced relevance_input shape: {relevance_input.shape}")
         
         return relevance_input
 
