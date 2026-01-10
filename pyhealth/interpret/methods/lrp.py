@@ -1259,6 +1259,11 @@ class UnifiedLRP:
         self.registry = custom_registry if custom_registry else create_default_registry()
         self.addition_handler = AdditionLRPHandler()
         
+        # Clear all handler caches to ensure clean state
+        for handler in self.registry.handlers.values():
+            if hasattr(handler, 'clear_cache'):
+                handler.clear_cache()
+        
         # Detect ResNet architecture and identify skip connections
         self.skip_connections = self._detect_skip_connections()
         self.block_caches = {}
@@ -1398,6 +1403,11 @@ class UnifiedLRP:
         for hook in self.hooks:
             hook.remove()
         self.hooks.clear()
+        
+        # Clear caches from ALL handlers in the registry (not just registered ones)
+        for handler in self.registry.handlers.values():
+            if hasattr(handler, 'clear_cache'):
+                handler.clear_cache()
         
         for _, _, handler in self.layer_order:
             handler.clear_cache()
