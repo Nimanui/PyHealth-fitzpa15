@@ -1207,12 +1207,12 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
         print(f"[AdaptiveAvgPool2d] Cached output shape: {output_shape}")
         
         # Handle case where relevance is 2D (flattened) instead of 4D
-        # This happens in ResNet where torch.flatten() is used functionally
+        # This happens when a Flatten layer follows this pooling layer
         if relevance_output.dim() == 2 and len(output_shape) == 4:
-            # Reshape from [batch, channels] to [batch, channels, 1, 1]
-            batch_size, channels = relevance_output.shape
-            relevance_output = relevance_output.view(batch_size, channels, 1, 1)
-            print(f"[AdaptiveAvgPool2d] Reshaped to 4D: {relevance_output.shape}")
+            # Reshape to match the cached output shape
+            # E.g., [1, 25088] -> [1, 512, 7, 7] where 25088 = 512 * 7 * 7
+            relevance_output = relevance_output.view(output_shape)
+            print(f"[AdaptiveAvgPool2d] Reshaped from 2D to 4D: {relevance_output.shape}")
         
         # For AdaptiveAvgPool2d, distribute relevance uniformly
         # Direct approach: create a tensor with exact input dimensions
