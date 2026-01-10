@@ -1302,6 +1302,21 @@ class AdditionLRPHandler(LRPLayerHandler):
         """This handler is manually invoked, not via isinstance checks."""
         return False
     
+    def forward_hook(self, module: nn.Module, input_tensor: torch.Tensor, output: torch.Tensor):
+        """Not used for addition operations."""
+        pass
+    
+    def backward_relevance(
+        self,
+        module: nn.Module,
+        input_relevance: torch.Tensor,
+        output_relevance: torch.Tensor,
+        rule: str = "epsilon",
+        **kwargs
+    ) -> torch.Tensor:
+        """Not used for addition operations. Use backward_relevance_split instead."""
+        return input_relevance
+    
     def cache_branches(self, operation_id: int, branch_a: torch.Tensor, branch_b: torch.Tensor):
         """Store the outputs of both branches before addition."""
         self.branch_cache[operation_id] = {
