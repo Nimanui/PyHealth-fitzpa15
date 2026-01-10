@@ -1286,6 +1286,78 @@ class DropoutLRPHandler(LRPLayerHandler):
         return relevance_output
 
 
+class AdditionLRPHandler(LRPLayerHandler):
+    """LRP handler for addition operations (skip connections).
+    
+    Handles y = a + b by splitting relevance between the two branches
+    proportionally to their contributions.
+    """
+    
+    def __init__(self):
+        super().__init__(name="AdditionHandler")
+        # Store branch outputs for each addition operation
+        self.branch_cache = {}
+    
+    def supports(self, layer: nn.Module) -> bool:
+        """This handler is manually invoked, not via isinstance checks."""
+        return False
+    
+    def cache_branches(self, operation_id: int, branch_a: torch.Tensor, branch_b: torch.Tensor):
+        """Store the outputs of both branches before addition."""
+        self.branch_cache[operation_id] = {
+            'branch_a': branch_a.detach(),
+            'branch_b': branch_b.detach()
+        }
+    
+    def backward_relevance_split(
+        self,
+        operation_id: int,
+        relevance_output: torch.Tensor,
+        rule: str = "epsilon",
+        epsilon: float = 1e-9,
+        **kwargs
+    ) -> tuple:
+        """Split relevance between two branches of an addition.
+        
+        Args:
+            operation_id: Unique identifier for this addition operation
+            relevance_output: Relevance flowing back through the addition
+            rule: LRP rule to use
+            epsilon: Stabilization parameter
+            
+        Returns:
+            (relevance_a, relevance_b): Relevance for each branch
+        """
+        if operation_id not in self.branch_cache:
+            raise RuntimeError(f"No cached branches for addition operation {operation_id}")
+        
+        cache = self.branch_cache[operation_id]
+        a = cache['branch_a']
+        b = cache['branch_b']
+        
+        # Split relevance proportionally to contributions
+        # R_a = (a / (a + b + eps)) * R_out
+        # R_b = (b / (a + b + eps)) * R_out
+        
+        z = a + b
+        z_stabilized = stabilize_denominator(z, epsilon, rule="epsilon")
+        
+        relevance_a = (a / z_stabilized) * relevance_output
+        relevance_b = (b / z_stabilized) * relevance_output
+        
+        # Validate conservation: R_a + R_b ≈ R_out
+        total_relevance = relevance_a + relevance_b
+        conservation_error = torch.abs(total_relevance - relevance_output).max().item()
+        max_relevance = torch.abs(relevance_output).max().item()
+        
+        if max_relevance > 1e-8:
+            relative_error = conservation_error / max_relevance
+            if relative_error > 0.1:  # 10% tolerance
+                print(f"Warning: Addition relevance conservation error: {relative_error:.2%}")
+        
+        return relevance_a, relevance_b
+
+
 def create_default_registry():
     """Create a registry with default handlers for common layers.
     

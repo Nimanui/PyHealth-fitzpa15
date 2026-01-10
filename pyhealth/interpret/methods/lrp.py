@@ -1246,7 +1246,7 @@ class UnifiedLRP:
             conservation_tolerance: Maximum allowed conservation error (fraction)
             custom_registry: Optional custom handler registry (uses default if None)
         """
-        from .lrp_base import create_default_registry, ConservationValidator
+        from .lrp_base import create_default_registry, ConservationValidator, AdditionLRPHandler
         
         self.model = model
         self.model.eval()
@@ -1257,6 +1257,10 @@ class UnifiedLRP:
         self.beta = beta
         
         self.registry = custom_registry if custom_registry else create_default_registry()
+        self.addition_handler = AdditionLRPHandler()
+        
+        # Detect ResNet architecture and identify skip connections
+        self.skip_connections = self._detect_skip_connections()
         
         self.validate_conservation = validate_conservation
         self.validator = ConservationValidator(
@@ -1266,6 +1270,27 @@ class UnifiedLRP:
         
         self.hooks = []
         self.layer_order = []
+    
+    def _detect_skip_connections(self):
+        """Detect ResNet BasicBlock/Bottleneck modules with skip connections.
+        
+        Returns:
+            List of (block_name, block_module, has_downsample) tuples
+        """
+        skip_connections = []
+        
+        for name, module in self.model.named_modules():
+            # Check if it's a ResNet BasicBlock or Bottleneck
+            module_name = type(module).__name__
+            if module_name in ['BasicBlock', 'Bottleneck']:
+                # Check if it has a downsample layer (1x1 conv for dimension matching)
+                has_downsample = hasattr(module, 'downsample') and module.downsample is not None
+                skip_connections.append((name, module, has_downsample))
+        
+        if skip_connections:
+            print(f"Detected {len(skip_connections)} ResNet skip connections")
+        
+        return skip_connections
     
     def attribute(
         self,
@@ -1348,6 +1373,33 @@ class UnifiedLRP:
         """Register forward hooks on all supported layers."""
         self.layer_order.clear()
         
+        # Register skip connection hooks for ResNet BasicBlocks
+        for block_name, block_module, has_downsample in self.skip_connections:
+            # Hook to capture identity (skip) and residual (main) branches
+            def create_skip_hook(handler, block_name_ref):
+                def hook(module, input, output):
+                    # Capture the identity (skip connection)
+                    identity = input[0]
+                    
+                    # Apply downsample if present
+                    if hasattr(module, 'downsample') and module.downsample is not None:
+                        identity = module.downsample(identity)
+                    
+                    # The residual is output - identity
+                    residual = output - identity
+                    
+                    # Cache both branches for relevance splitting
+                    operation_id = id(module)
+                    handler.cache_branches(operation_id, residual, identity)
+                
+                return hook
+            
+            handle = block_module.register_forward_hook(
+                create_skip_hook(self.addition_handler, block_name)
+            )
+            self.hooks.append(handle)
+        
+        # Register hooks for regular layers
         for name, module in self.model.named_modules():
             handler = self.registry.get_handler(module)
             
@@ -1423,13 +1475,45 @@ class UnifiedLRP:
         inputs: Dict[str, torch.Tensor],
         return_intermediates: bool = False
     ) -> Dict[str, torch.Tensor]:
-        """Propagate relevance backward through all layers."""
+        """Propagate relevance backward through all layers, handling skip connections."""
         from .lrp_base import check_tensor_validity
         
         current_relevance = output_relevance
         intermediate_relevances = {}
         
+        # Build a map of BasicBlock modules for skip connection handling
+        skip_map = {id(module): (name, module, has_ds) for name, module, has_ds in self.skip_connections}
+        
+        # Track which BasicBlock we're currently inside
+        current_block_id = None
+        block_relevance_split = None
+        
         for name, module, handler in reversed(self.layer_order):
+            # Check if we're exiting a BasicBlock (at the input of the block)
+            parent_block_id = self._get_parent_basic_block(name)
+            
+            if parent_block_id is not None and parent_block_id in skip_map:
+                # We're inside a BasicBlock
+                if current_block_id != parent_block_id:
+                    # Just entered a new BasicBlock, split relevance
+                    current_block_id = parent_block_id
+                    block_name, block_module, _ = skip_map[parent_block_id]
+                    
+                    # Split relevance between skip and main branch
+                    residual_rel, identity_rel = self.addition_handler.backward_relevance_split(
+                        operation_id=parent_block_id,
+                        relevance_output=current_relevance,
+                        rule=self.rule,
+                        epsilon=self.epsilon
+                    )
+                    
+                    # Store identity relevance to add back at block input
+                    block_relevance_split = (identity_rel, name)
+                    
+                    # Continue with residual relevance through main branch
+                    current_relevance = residual_rel
+            
+            # Normal backward propagation
             prev_relevance = handler.backward_relevance(
                 layer=module,
                 relevance_output=current_relevance,
@@ -1438,6 +1522,16 @@ class UnifiedLRP:
                 alpha=self.alpha,
                 beta=self.beta
             )
+            
+            # Check if we've reached the input of a BasicBlock
+            if block_relevance_split is not None:
+                # Check if this is the first conv in the block
+                if self._is_block_input_layer(name, current_block_id, skip_map):
+                    # Add identity relevance back to main path relevance
+                    identity_rel, _ = block_relevance_split
+                    prev_relevance = prev_relevance + identity_rel
+                    block_relevance_split = None
+                    current_block_id = None
             
             if self.validate_conservation:
                 self.validator.validate(
@@ -1459,6 +1553,26 @@ class UnifiedLRP:
             input_relevances['_intermediates'] = intermediate_relevances
         
         return input_relevances
+    
+    def _get_parent_basic_block(self, layer_name: str):
+        """Get the ID of the parent BasicBlock if this layer is inside one."""
+        # E.g., "layer1.0.conv1" -> check if "layer1.0" is a BasicBlock
+        parts = layer_name.split('.')
+        for i in range(len(parts), 0, -1):
+            parent_name = '.'.join(parts[:i])
+            parent_module = dict(self.model.named_modules()).get(parent_name)
+            if parent_module is not None and type(parent_module).__name__ in ['BasicBlock', 'Bottleneck']:
+                return id(parent_module)
+        return None
+    
+    def _is_block_input_layer(self, layer_name: str, block_id: int, skip_map: dict) -> bool:
+        """Check if this is the first convolution layer in a BasicBlock."""
+        if block_id not in skip_map:
+            return False
+        
+        block_name, _, _ = skip_map[block_id]
+        # The first conv is typically named "block_name.conv1"
+        return layer_name == f"{block_name}.conv1"
     
     def _map_to_inputs(
         self,
