@@ -1260,7 +1260,7 @@ class UnifiedLRP:
         self.addition_handler = AdditionLRPHandler()
         
         # Clear all handler caches to ensure clean state
-        for handler in self.registry.handlers.values():
+        for handler in self.registry._handlers:
             if hasattr(handler, 'clear_cache'):
                 handler.clear_cache()
         
@@ -1405,7 +1405,7 @@ class UnifiedLRP:
         self.hooks.clear()
         
         # Clear caches from ALL handlers in the registry (not just registered ones)
-        for handler in self.registry.handlers.values():
+        for handler in self.registry._handlers:
             if hasattr(handler, 'clear_cache'):
                 handler.clear_cache()
         
