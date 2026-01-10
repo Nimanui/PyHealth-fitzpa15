@@ -959,9 +959,6 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
         input_shape = input_tensor.shape
         indices = cache['indices']
         
-        print(f"[MaxPool2d] Relevance output shape: {relevance_output.shape}")
-        print(f"[MaxPool2d] Input shape: {input_shape}")
-        print(f"[MaxPool2d] Indices shape: {indices.shape}")
         # Unpool: distribute relevance to winning positions
         try:
             relevance_input = F.max_unpool2d(
@@ -974,6 +971,9 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
             )
         except RuntimeError:
             # If max_unpool2d fails, fall back to uniform distribution
+            relevance_input = F.interpolate(
+                relevance_output,
+                size=(input_shape[2], input_shape[3]),
                 mode='nearest'
             )
         
