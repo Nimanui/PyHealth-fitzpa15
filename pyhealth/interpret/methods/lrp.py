@@ -1374,45 +1374,8 @@ class UnifiedLRP:
         """Register forward hooks on all supported layers."""
         self.layer_order.clear()
         
-        # Register skip connection hooks for ResNet BasicBlocks
-        # We need to hook into the block to capture branches before addition
-        for block_name, block_module, has_downsample in self.skip_connections:
-            # Store the intermediate activations
-            block_cache = {'identity': None, 'residual': None}
-            
-            def create_block_forward_hook(handler, block_cache_ref, block_id):
-                def hook(module, input, output):
-                    # In BasicBlock forward():
-                    # identity = x (or downsample(x))
-                    # out = conv layers + bn + relu + ... 
-                    # out += identity  <- this is where addition happens
-                    # out = relu(out)
-                    
-                    # We need to intercept BEFORE the final addition
-                    # Cache the branches that were added
-                    identity = input[0]
-                    if hasattr(module, 'downsample') and module.downsample is not None:
-                        identity = module.downsample(identity)
-                    
-                    # Compute residual: it's what comes through the conv path
-                    # We'll need to capture this during forward pass through individual layers
-                    # For now, store the values we can compute
-                    block_cache_ref['identity'] = identity.detach()
-                    block_cache_ref['input'] = input[0].detach()
-                    block_cache_ref['output'] = output.detach()
-                
-                return hook
-            
-            # Register hook on the BasicBlock
-            handle = block_module.register_forward_hook(
-                create_block_forward_hook(self.addition_handler, block_cache, id(block_module))
-            )
-            self.hooks.append(handle)
-            
-            # Store cache reference for later use
-            if not hasattr(self, 'block_caches'):
-                self.block_caches = {}
-            self.block_caches[id(block_module)] = block_cache
+        # Note: Skip connection hooks disabled for sequential processing
+        # BasicBlocks are detected but not hooked
         
         # Register hooks for regular layers
         for name, module in self.model.named_modules():
