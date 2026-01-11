@@ -1478,9 +1478,14 @@ class UnifiedLRP:
         current_relevance = output_relevance
         intermediate_relevances = {}
         
+        print(f"\n🔍 Starting backward propagation through {len(self.layer_order)} layers")
+        
         # Process layers in reverse order (standard LRP)
         for idx in range(len(self.layer_order) - 1, -1, -1):
             name, module, handler = self.layer_order[idx]
+            
+            print(f"\n  Layer {idx}: {name} ({type(module).__name__})")
+            print(f"    Current relevance shape: {current_relevance.shape}")
             
             # Normal backward propagation through this layer
             prev_relevance = handler.backward_relevance(
@@ -1491,6 +1496,8 @@ class UnifiedLRP:
                 alpha=self.alpha,
                 beta=self.beta
             )
+            
+            print(f"    → Output relevance shape: {prev_relevance.shape}")
             
             if self.validate_conservation:
                 self.validator.validate(
