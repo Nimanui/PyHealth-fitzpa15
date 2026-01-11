@@ -1381,9 +1381,14 @@ class UnifiedLRP:
         
         # Note: Skip connection hooks disabled for sequential processing
         # BasicBlocks are detected but not hooked
+        # Downsample layers (part of skip connections) are excluded from sequential processing
         
         # Register hooks for regular layers
         for name, module in self.model.named_modules():
+            # Skip downsample layers - they're part of skip connections
+            if 'downsample' in name:
+                continue
+                
             handler = self.registry.get_handler(module)
             
             if handler is not None:
