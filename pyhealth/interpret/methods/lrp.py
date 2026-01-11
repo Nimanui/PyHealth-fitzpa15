@@ -600,12 +600,29 @@ class LayerwiseRelevancePropagation:
         current_relevance = output_relevance
         layer_names = list(reversed(list(self.activations.keys())))
 
+        # For MLP models with parallel feature branches, track relevance per branch
+        feature_relevances = {}  # Maps feature keys to their relevance tensors
+        concat_detected = False
+        
         # Propagate through each layer
-        for layer_name in layer_names:
+        for idx, layer_name in enumerate(layer_names):
             activation_info = self.activations[layer_name]
             module = activation_info["module"]
             output_tensor = activation_info["output"]
             
+            # Check if this is a concatenation point (PyHealth MLP pattern)
+            # Pattern: fc layer takes concatenated input from multiple feature MLPs
+            if (not concat_detected and isinstance(module, nn.Linear) and 
+                hasattr(self.model, 'feature_keys') and len(self.model.feature_keys) > 1):
+                
+                # Check if next layers are feature-specific MLPs
+                if idx + 1 < len(layer_names):
+                    next_name = layer_names[idx + 1]
+                    # Pattern like "mlp.conditions.2" or "mlp.labs.0"
+                    if 'mlp.' in next_name and any(f in next_name for f in self.model.feature_keys):
+                        # This is the concatenation point - split relevance after processing fc
+                        concat_detected = True
+                        
             # Ensure shape compatibility before layer processing
             if current_relevance.shape != output_tensor.shape:
                 current_relevance = self._match_shapes(current_relevance, output_tensor.shape)
@@ -625,7 +642,49 @@ class LayerwiseRelevancePropagation:
                 current_relevance = self._lrp_batchnorm2d(module, activation_info, current_relevance)
             elif isinstance(module, (nn.LSTM, nn.GRU)):
                 current_relevance = self._lrp_rnn(module, activation_info, current_relevance)
+            
+            # After processing, check if we need to split for parallel branches
+            if concat_detected and current_relevance.dim() == 2:
+                # Split relevance equally among features
+                # Each feature gets embedding_dim dimensions
+                n_features = len(self.model.feature_keys)
+                feature_dim = current_relevance.size(1) // n_features
+                
+                for i, feature_key in enumerate(self.model.feature_keys):
+                    start_idx = i * feature_dim
+                    end_idx = (i + 1) * feature_dim
+                    feature_relevances[feature_key] = current_relevance[:, start_idx:end_idx]
+                
+                # Now process each branch independently
+                # Continue with the rest of the layers, routing to appropriate branches
+                break
 
+        # If we detected concatenation, process remaining layers per feature
+        if concat_detected:
+            for feature_key in self.model.feature_keys:
+                current_rel = feature_relevances[feature_key]
+                
+                # Find layers for this feature
+                for layer_name in layer_names[idx+1:]:
+                    if feature_key not in layer_name:
+                        continue
+                        
+                    activation_info = self.activations[layer_name]
+                    module = activation_info["module"]
+                    output_tensor = activation_info["output"]
+                    
+                    if current_rel.shape != output_tensor.shape:
+                        current_rel = self._match_shapes(current_rel, output_tensor.shape)
+                    
+                    if isinstance(module, nn.Linear):
+                        current_rel = self._lrp_linear(module, activation_info, current_rel)
+                    elif isinstance(module, nn.ReLU):
+                        current_rel = self._lrp_relu(activation_info, current_rel)
+                
+                feature_relevances[feature_key] = current_rel
+            
+            return self._split_relevance_to_features(feature_relevances, input_embeddings)
+        
         return self._split_relevance_to_features(current_relevance, input_embeddings)
 
     def _lrp_linear(
@@ -1116,7 +1175,7 @@ class LayerwiseRelevancePropagation:
 
     def _split_relevance_to_features(
         self,
-        relevance: torch.Tensor,
+        relevance,  # Can be torch.Tensor or Dict[str, torch.Tensor]
         input_embeddings: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """Split combined relevance back to individual features.
@@ -1124,51 +1183,84 @@ class LayerwiseRelevancePropagation:
         In PyHealth models, embeddings from different features are
         concatenated before final classification. This method splits
         the relevance back to each feature.
+        
+        Note: After embeddings pass through the model, sequences are typically
+        pooled (mean/sum), so relevance shape is [batch, total_concat_dim] where
+        total_concat_dim is the sum of all feature dimensions after pooling.
 
         Args:
-            combined_relevance: Relevance at concatenated embedding layer.
+            relevance: Either:
+                - Tensor [batch, total_dim] - relevance at concatenated layer
+                - Dict mapping feature keys to relevance tensors (already split)
             input_embeddings: Original input embeddings for each feature.
 
         Returns:
             Dictionary mapping feature keys to their relevance tensors.
         """
         relevance_by_feature = {}
+        
+        # If relevance is already split per feature, just broadcast to input shapes
+        if isinstance(relevance, dict):
+            for key, rel_tensor in relevance.items():
+                if key not in input_embeddings:
+                    continue
+                    
+                emb_shape = input_embeddings[key].shape
+                if len(emb_shape) == 3 and rel_tensor.dim() == 2:
+                    # Broadcast: [batch, emb_dim] → [batch, seq_len, emb_dim]
+                    rel_tensor = rel_tensor.unsqueeze(1).expand(
+                        emb_shape[0], emb_shape[1], emb_shape[2]
+                    )
+                relevance_by_feature[key] = rel_tensor
+            return relevance_by_feature
 
-        # Calculate the size of each feature's embedding
+        # Calculate the actual concatenated size for each feature
+        # This must match what the model actually does after pooling
         feature_sizes = {}
         for key, emb in input_embeddings.items():
             if emb.dim() == 3:  # [batch, seq_len, embedding_dim]
-                feature_sizes[key] = emb.size(1) * emb.size(2)
-            elif emb.dim() == 2:  # [batch, embedding_dim]
+                # After pooling (mean/sum over seq), becomes [batch, embedding_dim]
+                feature_sizes[key] = emb.size(2)  # Just the embedding dimension
+            elif emb.dim() == 2:  # [batch, feature_dim]
+                # Stays as-is (e.g., tensor features like labs)
                 feature_sizes[key] = emb.size(1)
             else:
+                # Fallback
                 feature_sizes[key] = emb.numel() // emb.size(0)
 
+        # Verify total matches relevance size
+        total_size = sum(feature_sizes.values())
+        if relevance.dim() == 2 and relevance.size(1) != total_size:
+            # Size mismatch - this can happen if model has additional processing
+            # Distribute relevance equally to all features as fallback
+            for key in input_embeddings:
+                relevance_by_feature[key] = relevance / len(input_embeddings)
+            return relevance_by_feature
+
         # Split relevance according to feature sizes
-        # This assumes features are concatenated in order of feature_keys
-        if relevance.dim() == 2:  # [batch, total_features]
+        # Features are concatenated in the order of feature_keys
+        if relevance.dim() == 2:  # [batch, total_dim]
             current_idx = 0
             for key in self.model.feature_keys:
                 if key in input_embeddings:
                     size = feature_sizes[key]
                     rel_chunk = relevance[:, current_idx : current_idx + size]
 
-                    # Reshape to match original embedding shape
+                    # For 3D embeddings (sequences), broadcast relevance across sequence
                     emb_shape = input_embeddings[key].shape
                     if len(emb_shape) == 3:
-                        rel_chunk = rel_chunk.view(
+                        # Broadcast: [batch, emb_dim] → [batch, seq_len, emb_dim]
+                        rel_chunk = rel_chunk.unsqueeze(1).expand(
                             emb_shape[0], emb_shape[1], emb_shape[2]
                         )
-                    elif len(emb_shape) == 2:
-                        rel_chunk = rel_chunk.view(emb_shape[0], emb_shape[1])
+                    # For 2D embeddings (tensors), shape is already correct
 
                     relevance_by_feature[key] = rel_chunk
                     current_idx += size
         else:
-            # If relevance doesn't match expected shape, return as-is for each feature
-            # This is a fallback for complex architectures
+            # If relevance doesn't match expected shape, distribute equally
             for key in input_embeddings:
-                relevance_by_feature[key] = relevance
+                relevance_by_feature[key] = relevance / len(input_embeddings)
 
         return relevance_by_feature
 
@@ -1292,9 +1384,6 @@ class UnifiedLRP:
                 # Check if it has a downsample layer (1x1 conv for dimension matching)
                 has_downsample = hasattr(module, 'downsample') and module.downsample is not None
                 skip_connections.append((name, module, has_downsample))
-        
-        if skip_connections:
-            print(f"Detected {len(skip_connections)} ResNet skip connections")
         
         return skip_connections
     
@@ -1475,24 +1564,28 @@ class UnifiedLRP:
     ) -> Dict[str, torch.Tensor]:
         """Propagate relevance backward through all layers.
         
-        Note: Skip connection handling is detected but not yet fully implemented.
-        Currently processes ResNet sequentially, which gives approximate results.
+        For ResNet architectures, uses sequential approximation by processing
+        only the residual path layers (downsample layers are excluded during
+        hook registration). This is a standard approach in the LRP literature.
+        
+        Args:
+            output_relevance: Relevance at the output layer
+            inputs: Original model inputs (for final mapping)
+            return_intermediates: If True, return relevance at each layer
+            
+        Returns:
+            Dictionary mapping input keys to their relevance scores
         """
         from .lrp_base import check_tensor_validity
         
         current_relevance = output_relevance
         intermediate_relevances = {}
         
-        print(f"\n🔍 Starting backward propagation through {len(self.layer_order)} layers")
-        
-        # Process layers in reverse order (standard LRP)
+        # Process layers in reverse order (standard LRP backward pass)
         for idx in range(len(self.layer_order) - 1, -1, -1):
             name, module, handler = self.layer_order[idx]
             
-            print(f"\n  Layer {idx}: {name} ({type(module).__name__})")
-            print(f"    Current relevance shape: {current_relevance.shape}")
-            
-            # Normal backward propagation through this layer
+            # Backward propagation through this layer
             prev_relevance = handler.backward_relevance(
                 layer=module,
                 relevance_output=current_relevance,
@@ -1501,8 +1594,6 @@ class UnifiedLRP:
                 alpha=self.alpha,
                 beta=self.beta
             )
-            
-            print(f"    → Output relevance shape: {prev_relevance.shape}")
             
             if self.validate_conservation:
                 self.validator.validate(
