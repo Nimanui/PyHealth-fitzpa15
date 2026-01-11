@@ -821,13 +821,23 @@ class Conv2dLRPHandler(LRPLayerHandler):
         
         # Backward pass using transposed convolution
         # This distributes relevance back to inputs
+        # Calculate output_padding to match input size exactly
+        output_padding = []
+        for i in range(2):  # height and width
+            out_size = relevance_output.shape[2 + i]
+            in_size = x.shape[2 + i]
+            # Calculate expected output size from conv_transpose2d formula
+            expected_out = (out_size - 1) * layer.stride[i] - 2 * layer.padding[i] + layer.kernel_size[i]
+            # Adjust output_padding to match actual input size
+            output_padding.append(max(0, in_size - expected_out))
+        
         c = F.conv_transpose2d(
             s,
             layer.weight,
             None,
             stride=layer.stride,
             padding=layer.padding,
-            output_padding=0,
+            output_padding=tuple(output_padding),
             groups=layer.groups,
             dilation=layer.dilation
         )
@@ -878,16 +888,26 @@ class Conv2dLRPHandler(LRPLayerHandler):
         r_pos_frac = relevance_output / z_pos_stabilized
         r_neg_frac = relevance_output / z_neg_stabilized
         
+        # Calculate output_padding to match input size exactly
+        output_padding = []
+        for i in range(2):  # height and width
+            out_size = relevance_output.shape[2 + i]
+            in_size = x.shape[2 + i]
+            expected_out = (out_size - 1) * layer.stride[i] - 2 * layer.padding[i] + layer.kernel_size[i]
+            output_padding.append(max(0, in_size - expected_out))
+        
         # Backward passes
         relevance_pos = alpha * F.conv_transpose2d(
             r_pos_frac * z_pos, w_pos, None,
             stride=layer.stride, padding=layer.padding,
+            output_padding=tuple(output_padding),
             groups=layer.groups, dilation=layer.dilation
         ) * x / (x + epsilon)
         
         relevance_neg = beta * F.conv_transpose2d(
             r_neg_frac * z_neg, w_neg, None,
             stride=layer.stride, padding=layer.padding,
+            output_padding=tuple(output_padding),
             groups=layer.groups, dilation=layer.dilation
         ) * x / (x - epsilon)
         
