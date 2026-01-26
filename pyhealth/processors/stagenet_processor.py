@@ -1,13 +1,13 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 import torch
 
 from . import register_processor
-from .base_processor import FeatureProcessor
+from .base_processor import FeatureProcessor, VocabMixin
 
 
 @register_processor("stagenet")
-class StageNetProcessor(FeatureProcessor):
+class StageNetProcessor(FeatureProcessor, VocabMixin):
     """
     Feature processor for StageNet CODE inputs with coupled value/time data.
 
@@ -24,9 +24,9 @@ class StageNetProcessor(FeatureProcessor):
     - List of lists of strings -> nested code sequences
 
     Args:
-        padding: Additional padding to add on top of the observed maximum nested 
+        padding: Additional padding to add on top of the observed maximum nested
             sequence length. The actual padding length will be observed_max + padding.
-            This ensures the processor can handle sequences longer than those in the 
+            This ensures the processor can handle sequences longer than those in the
             training data. Default: 0 (no extra padding). Only applies to nested sequences.
 
     Returns:
@@ -55,13 +55,15 @@ class StageNetProcessor(FeatureProcessor):
     """
 
     def __init__(self, padding: int = 0):
-        self.code_vocab: Dict[Any, int] = {"<unk>": -1, "<pad>": 0}
+        # <unk> will be set to len(vocab) after fit
+        self.code_vocab: Dict[Any, int] = {"<unk>": None, "<pad>": 0}
         self._next_index = 1
         self._is_nested = None  # Will be determined during fit
-        self._max_nested_len = None  # Max inner sequence length for nested codes
+        # Max inner sequence length for nested codes
+        self._max_nested_len = None
         self._padding = padding  # Additional padding beyond observed max
 
-    def fit(self, samples: List[Dict], key: str) -> None:
+    def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
         """Build vocabulary and determine input structure.
 
         Args:
@@ -70,9 +72,9 @@ class StageNetProcessor(FeatureProcessor):
         """
         # Examine first non-None sample to determine structure
         for sample in samples:
-            if key in sample and sample[key] is not None:
+            if field in sample and sample[field] is not None:
                 # Unpack tuple: (time, values)
-                time_data, value_data = sample[key]
+                time_data, value_data = sample[field]
 
                 # Determine nesting level for codes
                 if isinstance(value_data, list) and len(value_data) > 0:
@@ -90,9 +92,9 @@ class StageNetProcessor(FeatureProcessor):
         # Build vocabulary for codes and find max nested length
         max_inner_len = 0
         for sample in samples:
-            if key in sample and sample[key] is not None:
+            if field in sample and sample[field] is not None:
                 # Unpack tuple: (time, values)
-                time_data, value_data = sample[key]
+                time_data, value_data = sample[field]
 
                 if self._is_nested:
                     # Nested codes
@@ -115,6 +117,28 @@ class StageNetProcessor(FeatureProcessor):
         if self._is_nested:
             observed_max = max(1, max_inner_len)
             self._max_nested_len = observed_max + self._padding
+
+        # Set <unk> token to the next available index
+        # Since <unk> is already in the vocab dict, we use _next_index
+        self.code_vocab["<unk>"] = self._next_index
+
+    def remove(self, vocabularies: set[str]):
+        """Remove specified vocabularies from the processor."""
+        vocab = list(set(self.code_vocab.keys()) - vocabularies - {"<pad>", "<unk>"})
+        vocab = ["<pad>"] + vocab + ["<unk>"]
+        self.code_vocab = {v: i for i, v in enumerate(vocab)}
+
+    def retain(self, vocabularies: set[str]):
+        """Retain only the specified vocabularies in the processor."""
+        vocab = list(set(self.code_vocab.keys()) & vocabularies)
+        vocab = ["<pad>"] + vocab + ["<unk>"]
+        self.code_vocab = {v: i for i, v in enumerate(vocab)}
+
+    def add(self, vocabularies: set[str]):
+        """Add specified vocabularies to the processor."""
+        vocab = list(set(self.code_vocab.keys()) | vocabularies - {"<pad>", "<unk>"})
+        vocab = ["<pad>"] + vocab + ["<unk>"]
+        self.code_vocab = {v: i for i, v in enumerate(vocab)}
 
     def process(
         self, value: Tuple[Optional[List], List]
@@ -256,7 +280,7 @@ class StageNetTensorProcessor(FeatureProcessor):
         self._size = None  # Feature dimension (set during fit)
         self._is_nested = None
 
-    def fit(self, samples: List[Dict], key: str) -> None:
+    def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
         """Determine input structure.
 
         Args:
@@ -265,9 +289,9 @@ class StageNetTensorProcessor(FeatureProcessor):
         """
         # Examine first non-None sample to determine structure
         for sample in samples:
-            if key in sample and sample[key] is not None:
+            if field in sample and sample[field] is not None:
                 # Unpack tuple: (time, values)
-                time_data, value_data = sample[key]
+                time_data, value_data = sample[field]
 
                 # Determine nesting level for numerics
                 if isinstance(value_data, list) and len(value_data) > 0:
@@ -342,7 +366,6 @@ class StageNetTensorProcessor(FeatureProcessor):
 
         return (time_tensor, value_tensor)
 
-    @property
     def size(self):
         """Return feature dimension."""
         return self._size

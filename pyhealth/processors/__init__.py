@@ -30,6 +30,10 @@ from .nested_sequence_processor import (
     NestedFloatsProcessor,
     NestedSequenceProcessor,
 )
+from .deep_nested_sequence_processor import (
+    DeepNestedFloatsProcessor,
+    DeepNestedSequenceProcessor,
+)
 from .raw_processor import RawProcessor
 from .sequence_processor import SequenceProcessor
 from .signal_processor import SignalProcessor
@@ -41,6 +45,7 @@ from .tensor_processor import TensorProcessor
 from .text_processor import TextProcessor
 from .timeseries_processor import TimeseriesProcessor
 from .audio_processor import AudioProcessor
+from .ignore_processor import IgnoreProcessor
 
 # Expose public API
 __all__ = [
