@@ -79,6 +79,9 @@ future runs without re-fitting.
 - ``samples.record_to_index`` — maps a visit/record ID to the sample indices
   for that visit.
 
+Calling ``samples.subset(...)`` rebuilds both lookups with indices local to the
+new dataset, so they remain valid after repeated splitting.
+
 For testing or small cohorts you can skip the disk step entirely using
 ``InMemorySampleDataset``, which holds all processed samples in RAM and is
 returned by default from ``create_sample_dataset()``.
@@ -225,6 +228,7 @@ Available Datasets
     datasets/pyhealth.datasets.MIMIC3Dataset
     datasets/pyhealth.datasets.MIMIC4Dataset
     datasets/pyhealth.datasets.FHIRDataset
+    datasets/pyhealth.datasets.MEDSDataset
     datasets/pyhealth.datasets.MIMIC4FHIR
     datasets/pyhealth.datasets.MedicalTranscriptionsDataset
     datasets/pyhealth.datasets.CardiologyDataset
