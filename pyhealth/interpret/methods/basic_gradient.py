@@ -1,7 +1,7 @@
 import torch
-import numpy as np
-from typing import Dict
+
 from pyhealth.interpret.methods.base_interpreter import BaseInterpreter
+
 
 class BasicGradientSaliencyMaps(BaseInterpreter):
     """Compute gradient-based saliency maps for image classification models.
@@ -28,47 +28,43 @@ class BasicGradientSaliencyMaps(BaseInterpreter):
         where c iterates over color channels (RGB or grayscale)
     
     Examples:
-        Basic usage with a batch::
-        
-            from pyhealth.interpret.methods.basic_gradient import BasicGradientSaliencyMaps
-            import matplotlib.pyplot as plt
-            
-            # Create batch
-            batch = {
-                'image': torch.randn(2, 3, 224, 224),
-                'disease': torch.tensor([0, 1])
-            }
-            
-            # Compute saliency maps
-            saliency = BasicGradientSaliencyMaps(model, input_batch=batch)
-            
-            # Visualize
-            saliency.visualize_saliency_map(
-                plt, 
-                image_index=0,
-                title="Saliency Map",
-                id2label={0: "Normal", 1: "COVID"}
-            )
-        
-        Using the attribute() interface::
-        
-            # Initialize without batch
-            saliency = BasicGradientSaliencyMaps(model)
-            
-            # Compute attributions for new data
-            attributions = saliency.attribute(**batch)
-            # Returns: {'image': tensor with saliency maps}
-            
-            # Save to batch history
-            attributions = saliency.attribute(save_to_batch=True, **batch)
-    
+        >>> import torch
+        >>> import matplotlib.pyplot as plt
+        >>> from pyhealth.interpret.methods.basic_gradient import (
+        ...     BasicGradientSaliencyMaps,
+        ... )
+        >>>
+        >>> batch = {
+        ...     "image": torch.randn(2, 3, 224, 224),
+        ...     "disease": torch.tensor([0, 1]),
+        ... }
+        >>> # ... train an image classification model ...
+        >>>
+        >>> # Compute saliency maps up front for a batch
+        >>> saliency = BasicGradientSaliencyMaps(model, input_batch=batch)
+        >>> saliency.visualize_saliency_map(
+        ...     plt,
+        ...     image_index=0,
+        ...     title="Saliency Map",
+        ...     id2label={0: "Normal", 1: "COVID"},
+        ... )
+        >>>
+        >>> # Or use the attribute() interface on new data
+        >>> saliency = BasicGradientSaliencyMaps(model)
+        >>> attributions = saliency.attribute(**batch)
+        >>> # Returns dict: {"image": tensor of saliency maps}
+        >>> attributions["image"].shape  # [batch, H, W]
+        >>>
+        >>> # Append the result to the interpreter's batch history
+        >>> attributions = saliency.attribute(save_to_batch=True, **batch)
+
     Note:
         - Do not use within ``torch.no_grad()`` context as gradients are required
         - Works with any PyHealth image classification model
         - For best results, normalize input images consistently with training
     
     See Also:
-        - ``examples/ChestXrayClassificationWithSaliency.ipynb``: Complete tutorial
+        - ``examples/cxr/ChestXrayClassificationWithSaliency.ipynb``: Complete tutorial
         - :class:`~pyhealth.interpret.methods.IntegratedGradients`: Alternative attribution method
     """
     def __init__(self, model, input_batch=None, image_key='image', label_key='disease'):
@@ -99,7 +95,7 @@ class BasicGradientSaliencyMaps(BaseInterpreter):
         if input_batch is not None:
             self._compute_saliency_maps()
     
-    def attribute(self, save_to_batch=False, **data) -> Dict[str, torch.Tensor]:
+    def attribute(self, save_to_batch=False, **data) -> dict[str, torch.Tensor]:
         """Compute attribution scores for input features.
         
         This method implements the BaseInterpreter interface by computing

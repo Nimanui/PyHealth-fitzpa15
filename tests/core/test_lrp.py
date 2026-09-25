@@ -562,12 +562,15 @@ class TestDifferentRules(unittest.TestCase):
         attrs_epsilon = lrp_epsilon.attribute(**self.test_batch)
         attrs_alphabeta = lrp_alphabeta.attribute(**self.test_batch)
 
-        # Check that at least one feature has different attributions
+        # Compare on a RELATIVE scale. LRP attributions on this fixture are
+        # O(1e-3), so an absolute tolerance of 0.1 is larger than the entire
+        # signal and would call any two tensors "close" -- including genuinely
+        # different ones.
         different = False
         for key in attrs_epsilon.keys():
-            if not torch.allclose(
-                attrs_epsilon[key], attrs_alphabeta[key], rtol=0.1, atol=0.1
-            ):
+            e, a = attrs_epsilon[key], attrs_alphabeta[key]
+            scale = max(e.abs().max().item(), a.abs().max().item(), 1e-12)
+            if ((e - a).abs().max().item() / scale) > 0.01:
                 different = True
                 break
 
@@ -1302,10 +1305,13 @@ class TestStageNetLRP(unittest.TestCase):
         attrs_eps = lrp_eps.attribute(**batch)
         attrs_ab = lrp_ab.attribute(**batch)
 
-        different = any(
-            not torch.allclose(attrs_eps[k], attrs_ab[k], rtol=0.1, atol=0.1)
-            for k in attrs_eps
-        )
+        # Relative comparison: absolute tolerances larger than the attribution
+        # scale make this assertion vacuous (see TestDifferentRules).
+        def _rel_diff(e, a):
+            scale = max(e.abs().max().item(), a.abs().max().item(), 1e-12)
+            return (e - a).abs().max().item() / scale
+
+        different = any(_rel_diff(attrs_eps[k], attrs_ab[k]) > 0.01 for k in attrs_eps)
         self.assertTrue(different,
             "Epsilon and alphabeta rules should produce different attributions")
 
@@ -1355,3 +1361,59 @@ class TestStageNetLRP(unittest.TestCase):
 if __name__ == "__main__":
     # pytest.main([__file__, "-v", "-s"])  # Disabled - use unittest
     pass
+
+
+class TestAlphaBetaSignSeparation(unittest.TestCase):
+    """alpha-beta must split on contributions x_i*w_ij, not on weights alone.
+
+    Regression test: the handlers used to pair W+ with the raw signed input, so
+    for x_i < 0 a positive weight still routed relevance down the "positive"
+    path. With beta=0 (negative path disabled) relevance could still come back
+    negative, and totals diverged wildly from the propagated relevance.
+    """
+
+    def test_linear_alphabeta_is_sign_preserving_with_beta_zero(self):
+        from torch import nn
+
+        from pyhealth.interpret.methods.lrp_base import LinearLRPHandler
+
+        layer = nn.Linear(4, 1, bias=False)
+        with torch.no_grad():
+            layer.weight.copy_(torch.tensor([[1.0, 1.0, 1.0, 1.0]]))
+        handler = LinearLRPHandler()
+
+        x = torch.tensor([[1.0, -2.0, 3.0, -4.0]])  # signed, as embeddings are
+        handler.forward_hook(layer, (x,), layer(x))
+        relevance = handler.backward_relevance(
+            layer, torch.tensor([[1.0]]), rule="alphabeta", alpha=1.0, beta=0.0
+        )
+
+        self.assertFalse(
+            bool((relevance < 0).any()),
+            f"beta=0 disables the negative path, so relevance must stay "
+            f"non-negative for positive output relevance; got {relevance}",
+        )
+        # alpha - beta == 1 => relevance is conserved
+        self.assertAlmostEqual(relevance.sum().item(), 1.0, places=4)
+
+    def test_conv2d_alphabeta_is_sign_preserving_with_beta_zero(self):
+        from torch import nn
+
+        from pyhealth.interpret.methods.lrp_base import Conv2dLRPHandler
+
+        layer = nn.Conv2d(1, 2, kernel_size=3, padding=1, bias=False)
+        with torch.no_grad():
+            layer.weight.abs_()
+        handler = Conv2dLRPHandler()
+
+        x = torch.randn(1, 1, 8, 8)  # signed input
+        z = layer(x)
+        handler.forward_hook(layer, (x,), z)
+        relevance = handler.backward_relevance(
+            layer, torch.ones_like(z), rule="alphabeta", alpha=1.0, beta=0.0
+        )
+
+        self.assertFalse(
+            bool((relevance < 0).any()),
+            "beta=0 must not produce negative relevance on the conv path",
+        )

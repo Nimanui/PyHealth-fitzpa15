@@ -11,9 +11,9 @@ The visualizations support both grayscale and RGB images with customizable
 overlays and color maps.
 """
 
+
 import numpy as np
 import torch
-from typing import Optional, Dict, Union, Tuple
 
 
 class SaliencyVisualizer:
@@ -45,7 +45,7 @@ class SaliencyVisualizer:
         self,
         default_cmap: str = 'hot',
         default_alpha: float = 0.3,
-        figure_size: Tuple[int, int] = (15, 7)
+        figure_size: tuple[int, int] = (15, 7)
     ):
         """Initialize the saliency visualizer.
         
@@ -61,14 +61,14 @@ class SaliencyVisualizer:
     def plot_saliency_overlay(
         self,
         plt,
-        image: Union[torch.Tensor, np.ndarray],
-        saliency: Union[torch.Tensor, np.ndarray],
-        title: Optional[str] = None,
-        alpha: Optional[float] = None,
-        cmap: Optional[str] = None,
+        image: torch.Tensor | np.ndarray,
+        saliency: torch.Tensor | np.ndarray,
+        title: str | None = None,
+        alpha: float | None = None,
+        cmap: str | None = None,
         normalize: bool = True,
         show: bool = True,
-        save_path: Optional[str] = None
+        save_path: str | None = None
     ) -> None:
         """Plot image with saliency map overlay.
         
@@ -129,13 +129,13 @@ class SaliencyVisualizer:
     def plot_multiple_attributions(
         self,
         plt,
-        image: Union[torch.Tensor, np.ndarray],
-        attributions: Dict[str, Union[torch.Tensor, np.ndarray]],
-        method_names: Optional[Dict[str, str]] = None,
-        alpha: Optional[float] = None,
-        cmap: Optional[str] = None,
+        image: torch.Tensor | np.ndarray,
+        attributions: dict[str, torch.Tensor | np.ndarray],
+        method_names: dict[str, str] | None = None,
+        alpha: float | None = None,
+        cmap: str | None = None,
         normalize: bool = True,
-        save_path: Optional[str] = None
+        save_path: str | None = None
     ) -> None:
         """Plot multiple attribution methods side-by-side for comparison.
         
@@ -155,7 +155,9 @@ class SaliencyVisualizer:
             cmap = self.default_cmap
         
         num_methods = len(attributions)
-        fig, axes = plt.subplots(1, num_methods + 1, figsize=(5 * (num_methods + 1), 5))
+        _fig, axes = plt.subplots(
+            1, num_methods + 1, figsize=(5 * (num_methods + 1), 5)
+        )
         
         # Convert image to numpy
         img_np = self._process_image(self._to_numpy(image))
@@ -201,12 +203,12 @@ class SaliencyVisualizer:
     def plot_saliency_heatmap(
         self,
         plt,
-        saliency: Union[torch.Tensor, np.ndarray],
-        title: Optional[str] = None,
-        cmap: Optional[str] = None,
+        saliency: torch.Tensor | np.ndarray,
+        title: str | None = None,
+        cmap: str | None = None,
         normalize: bool = True,
         show: bool = True,
-        save_path: Optional[str] = None
+        save_path: str | None = None
     ) -> None:
         """Plot saliency map as a standalone heatmap (no image overlay).
         
@@ -247,11 +249,11 @@ class SaliencyVisualizer:
     def plot_attribution_distribution(
         self,
         plt,
-        attributions: Union[torch.Tensor, np.ndarray],
-        title: Optional[str] = None,
+        attributions: torch.Tensor | np.ndarray,
+        title: str | None = None,
         bins: int = 50,
         show: bool = True,
-        save_path: Optional[str] = None
+        save_path: str | None = None
     ) -> None:
         """Plot histogram of attribution values.
         
@@ -296,12 +298,12 @@ class SaliencyVisualizer:
     def plot_top_k_features(
         self,
         plt,
-        image: Union[torch.Tensor, np.ndarray],
-        attributions: Union[torch.Tensor, np.ndarray],
+        image: torch.Tensor | np.ndarray,
+        attributions: torch.Tensor | np.ndarray,
         k: int = 10,
-        title: Optional[str] = None,
+        title: str | None = None,
         show: bool = True,
-        save_path: Optional[str] = None
+        save_path: str | None = None
     ) -> None:
         """Highlight top-k most important pixels/features.
         
@@ -361,7 +363,7 @@ class SaliencyVisualizer:
     
     # Helper methods
     
-    def _to_numpy(self, tensor: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
+    def _to_numpy(self, tensor: torch.Tensor | np.ndarray) -> np.ndarray:
         """Convert tensor to numpy array."""
         if isinstance(tensor, torch.Tensor):
             return tensor.detach().cpu().numpy()
@@ -457,9 +459,9 @@ class SaliencyVisualizer:
 # Convenience function for quick visualization
 def visualize_attribution(
     plt,
-    image: Union[torch.Tensor, np.ndarray],
-    attribution: Union[torch.Tensor, np.ndarray],
-    title: Optional[str] = None,
+    image: torch.Tensor | np.ndarray,
+    attribution: torch.Tensor | np.ndarray,
+    title: str | None = None,
     method: str = 'overlay',
     **kwargs
 ) -> None:

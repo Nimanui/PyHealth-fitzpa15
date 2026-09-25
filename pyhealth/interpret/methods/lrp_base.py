@@ -8,12 +8,12 @@ References:
     with Local Renormalization Layers", arXiv:1604.00825, 2016.
 """
 
-from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple, List
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import logging
+from abc import ABC, abstractmethod
+
+import torch
+import torch.nn.functional as F
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,16 @@ def stabilize_denominator(
 
     Returns:
         Stabilized tensor safe for division.
+
+    Examples:
+        >>> import torch
+        >>> from pyhealth.interpret.methods.lrp_base import stabilize_denominator
+        >>> z = torch.tensor([[2.0, -2.0, 0.0]])
+        >>> out = stabilize_denominator(z, epsilon=0.1, rule="epsilon")
+        >>> bool(torch.allclose(out, torch.tensor([[2.1, -2.1, 0.1]])))
+        True
+        >>> bool((stabilize_denominator(z, 0.1, rule="z+") >= 0.1).all())
+        True
     """
     if rule == "epsilon":
         sign = z.sign()
@@ -49,7 +59,19 @@ def stabilize_denominator(
 
 
 def check_tensor_validity(tensor: torch.Tensor, name: str = "tensor") -> bool:
-    """Check tensor for NaN or Inf values."""
+    """Check tensor for NaN or Inf values.
+
+    Examples:
+        >>> import torch
+        >>> from pyhealth.interpret.methods.lrp_base import check_tensor_validity
+        >>> check_tensor_validity(torch.ones(2, 2), "relevance")
+        True
+        >>> import logging
+        >>> logging.disable(logging.ERROR)  # silence the diagnostic log line
+        >>> check_tensor_validity(torch.tensor([float("nan")]), "relevance")
+        False
+        >>> logging.disable(logging.NOTSET)
+    """
     if torch.isnan(tensor).any().item():
         logger.error(f"{name} contains NaN values!")
         return False
@@ -61,11 +83,21 @@ def check_tensor_validity(tensor: torch.Tensor, name: str = "tensor") -> bool:
 
 def pad_to_match(
     x: torch.Tensor, expected_size: int
-) -> Tuple[torch.Tensor, int]:
+) -> tuple[torch.Tensor, int]:
     """Pad or truncate *x* along dim=1 to *expected_size*.
 
     Returns:
         Tuple of (adjusted_x, original_size).
+
+    Examples:
+        >>> import torch
+        >>> from pyhealth.interpret.methods.lrp_base import pad_to_match
+        >>> padded, original = pad_to_match(torch.ones(1, 3), 5)
+        >>> padded.shape, original
+        (torch.Size([1, 5]), 3)
+        >>> truncated, original = pad_to_match(torch.ones(1, 6), 4)
+        >>> truncated.shape, original
+        (torch.Size([1, 4]), 6)
     """
     orig = x.size(1)
     if orig == expected_size:
@@ -81,7 +113,16 @@ def pad_to_match(
 def match_relevance_dim(
     relevance: torch.Tensor, target_size: int
 ) -> torch.Tensor:
-    """Pad or truncate *relevance* along dim=1 to *target_size*."""
+    """Pad or truncate *relevance* along dim=1 to *target_size*.
+
+    Examples:
+        >>> import torch
+        >>> from pyhealth.interpret.methods.lrp_base import match_relevance_dim
+        >>> match_relevance_dim(torch.ones(1, 5), 3).shape
+        torch.Size([1, 3])
+        >>> match_relevance_dim(torch.ones(1, 2), 4).shape
+        torch.Size([1, 4])
+    """
     current = relevance.size(1)
     if current == target_size:
         return relevance
@@ -97,9 +138,19 @@ def match_relevance_dim(
 
 
 def conv_output_padding(
-    layer: nn.Module, z_shape: Tuple, x_shape: Tuple
-) -> Tuple:
-    """Compute output_padding for conv_transpose2d to recover input spatial size."""
+    layer: nn.Module, z_shape: tuple, x_shape: tuple
+) -> tuple:
+    """Compute output_padding for conv_transpose2d to recover input spatial size.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import conv_output_padding
+        >>> layer = nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1)
+        >>> x = torch.randn(1, 1, 8, 8)
+        >>> conv_output_padding(layer, layer(x).shape, x.shape)
+        (1, 1)
+    """
     pads = []
     for i in range(2):
         s = layer.stride[i] if isinstance(layer.stride, tuple) else layer.stride
@@ -110,8 +161,17 @@ def conv_output_padding(
     return tuple(pads)
 
 
-def crop_spatial(tensor: torch.Tensor, target_shape: Tuple) -> torch.Tensor:
-    """Crop or zero-pad a 4-D tensor to match *target_shape* in the spatial dims."""
+def crop_spatial(tensor: torch.Tensor, target_shape: tuple) -> torch.Tensor:
+    """Crop or zero-pad a 4-D tensor to match *target_shape* in the spatial dims.
+
+    Examples:
+        >>> import torch
+        >>> from pyhealth.interpret.methods.lrp_base import crop_spatial
+        >>> crop_spatial(torch.ones(1, 1, 8, 8), (1, 1, 5, 5)).shape
+        torch.Size([1, 1, 5, 5])
+        >>> crop_spatial(torch.ones(1, 1, 3, 3), (1, 1, 4, 4)).shape
+        torch.Size([1, 1, 4, 4])
+    """
     if tensor.shape[2:] == target_shape[2:]:
         return tensor
     if tensor.shape[2] > target_shape[2] or tensor.shape[3] > target_shape[3]:
@@ -131,6 +191,17 @@ class LRPLayerHandler(ABC):
 
     Each handler implements forward activation caching and backward
     relevance propagation for a specific layer type.
+
+    Examples:
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import (
+        ...     LinearLRPHandler,
+        ...     LRPLayerHandler,
+        ... )
+        >>> issubclass(LinearLRPHandler, LRPLayerHandler)
+        True
+        >>> LinearLRPHandler().supports(nn.Linear(4, 2))
+        True
     """
 
     def __init__(self, name: str):
@@ -142,7 +213,7 @@ class LRPLayerHandler(ABC):
         """Return True if this handler can process the given layer type."""
 
     def forward_hook(
-        self, module: nn.Module, input: Tuple, output: torch.Tensor
+        self, module: nn.Module, input: tuple, output: torch.Tensor
     ) -> None:
         """Cache input/output activations during forward pass."""
         input_tensor = input[0] if isinstance(input, tuple) else input
@@ -174,7 +245,7 @@ class LRPLayerHandler(ABC):
     def clear_cache(self):
         self.activations_cache.clear()
 
-    def _get_cached(self, layer: nn.Module) -> Dict:
+    def _get_cached(self, layer: nn.Module) -> dict:
         module_id = id(layer)
         if module_id not in self.activations_cache:
             raise RuntimeError(
@@ -185,11 +256,25 @@ class LRPLayerHandler(ABC):
 
 
 class LRPHandlerRegistry:
-    """Registry that maps layer types to their LRP handlers."""
+    """Registry that maps layer types to their LRP handlers.
+
+    Examples:
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import (
+        ...     LinearLRPHandler,
+        ...     LRPHandlerRegistry,
+        ... )
+        >>> registry = LRPHandlerRegistry()
+        >>> registry.register(LinearLRPHandler())
+        >>> registry.get_handler(nn.Linear(4, 2)).name
+        'LinearHandler'
+        >>> registry.get_handler(nn.LayerNorm(4)) is None
+        True
+    """
 
     def __init__(self):
-        self._handlers: List[LRPLayerHandler] = []
-        self._cache: Dict[type, LRPLayerHandler] = {}
+        self._handlers: list[LRPLayerHandler] = []
+        self._cache: dict[type, LRPLayerHandler] = {}
 
     def register(self, handler: LRPLayerHandler) -> None:
         if not isinstance(handler, LRPLayerHandler):
@@ -197,7 +282,7 @@ class LRPHandlerRegistry:
         self._handlers.append(handler)
         self._cache.clear()
 
-    def get_handler(self, layer: nn.Module) -> Optional[LRPLayerHandler]:
+    def get_handler(self, layer: nn.Module) -> LRPLayerHandler | None:
         layer_type = type(layer)
         if layer_type in self._cache:
             return self._cache[layer_type]
@@ -225,6 +310,16 @@ class LinearLRPHandler(LRPLayerHandler):
 
     Handles higher-dimensional inputs by flattening to 2-D and pads/truncates
     when the input width does not perfectly match the weight matrix width.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import LinearLRPHandler
+        >>> layer, handler = nn.Linear(4, 2), LinearLRPHandler()
+        >>> x = torch.randn(1, 4)
+        >>> handler.forward_hook(layer, (x,), layer(x))
+        >>> handler.backward_relevance(layer, torch.ones(1, 2), rule="epsilon").shape
+        torch.Size([1, 4])
     """
 
     def __init__(self):
@@ -265,24 +360,55 @@ class LinearLRPHandler(LRPLayerHandler):
         return result
 
     def _alphabeta_rule(self, layer, x, relevance_output, alpha, beta):
+        # The alpha-beta rule splits each *contribution* z_ij = x_i * w_ij into
+        # its positive and negative parts -- not the weights alone. For x_i < 0 a
+        # positive weight produces a negative contribution, so pairing W+ with a
+        # signed input mixes the two paths and lets relevance change sign even
+        # when beta == 0. Split the input as well:
+        #     z+ = x+ @ W+ + x- @ W-      (both products positive)
+        #     z- = x+ @ W- + x- @ W+      (both products negative)
         x_p, orig = pad_to_match(x, layer.weight.size(1))
         W_pos = torch.clamp(layer.weight, min=0)
         W_neg = torch.clamp(layer.weight, max=0)
         b_pos = torch.clamp(layer.bias, min=0) if layer.bias is not None else None
         b_neg = torch.clamp(layer.bias, max=0) if layer.bias is not None else None
-        z_pos = F.linear(x_p, W_pos, b_pos) + 1e-9
-        z_neg = F.linear(x_p, W_neg, b_neg) - 1e-9
+        x_pos = torch.clamp(x_p, min=0)
+        x_neg = torch.clamp(x_p, max=0)
+
+        z_pos = F.linear(x_pos, W_pos, b_pos) + F.linear(x_neg, W_neg, None) + 1e-9
+        z_neg = F.linear(x_pos, W_neg, b_neg) + F.linear(x_neg, W_pos, None) - 1e-9
+
         relevance_output = match_relevance_dim(relevance_output, z_pos.size(1))
-        c_pos = torch.einsum("bo,oi->bi", relevance_output / z_pos, W_pos)
-        c_neg = torch.einsum("bo,oi->bi", relevance_output / z_neg, W_neg)
-        result = x_p * (alpha * c_pos - beta * c_neg)
+        s_pos = relevance_output / z_pos
+        s_neg = relevance_output / z_neg
+
+        c_pos = x_pos * torch.einsum("bo,oi->bi", s_pos, W_pos) + x_neg * torch.einsum(
+            "bo,oi->bi", s_pos, W_neg
+        )
+        c_neg = x_pos * torch.einsum("bo,oi->bi", s_neg, W_neg) + x_neg * torch.einsum(
+            "bo,oi->bi", s_neg, W_pos
+        )
+
+        result = alpha * c_pos - beta * c_neg
         if result.size(1) != orig:
             result = result[:, :orig]
         return result
 
 
 class ReLULRPHandler(LRPLayerHandler):
-    """LRP handler for nn.ReLU — relevance passes through unchanged."""
+    """LRP handler for nn.ReLU — relevance passes through unchanged.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import ReLULRPHandler
+        >>> handler = ReLULRPHandler()
+        >>> handler.supports(nn.ReLU())
+        True
+        >>> relevance = torch.tensor([[1.0, -2.0]])
+        >>> bool(torch.equal(handler.backward_relevance(nn.ReLU(), relevance), relevance))
+        True
+    """
 
     def __init__(self):
         super().__init__(name="ReLUHandler")
@@ -295,7 +421,18 @@ class ReLULRPHandler(LRPLayerHandler):
 
 
 class EmbeddingLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.Embedding — sum over embedding dim."""
+    """LRP handler for nn.Embedding — sum over embedding dim.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import EmbeddingLRPHandler
+        >>> handler = EmbeddingLRPHandler()
+        >>> handler.supports(nn.Embedding(10, 4))
+        True
+        >>> handler.backward_relevance(nn.Embedding(10, 4), torch.ones(1, 3, 4)).shape
+        torch.Size([1, 3])
+    """
 
     def __init__(self):
         super().__init__(name="EmbeddingHandler")
@@ -322,7 +459,19 @@ class EmbeddingLRPHandler(LRPLayerHandler):
 
 
 class Conv2dLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.Conv2d layers (epsilon and alphabeta rules)."""
+    """LRP handler for nn.Conv2d layers (epsilon and alphabeta rules).
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import Conv2dLRPHandler
+        >>> layer, handler = nn.Conv2d(1, 2, kernel_size=3, padding=1), Conv2dLRPHandler()
+        >>> x = torch.randn(1, 1, 8, 8)
+        >>> z = layer(x)
+        >>> handler.forward_hook(layer, (x,), z)
+        >>> handler.backward_relevance(layer, torch.ones_like(z)).shape
+        torch.Size([1, 1, 8, 8])
+    """
 
     def __init__(self):
         super().__init__(name="Conv2dHandler")
@@ -349,12 +498,12 @@ class Conv2dLRPHandler(LRPLayerHandler):
         raise ValueError(f"Unsupported rule: {rule}")
 
     def _epsilon_rule(self, layer, x, relevance_output, epsilon):
-        conv_kw = dict(
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups,
-        )
+        conv_kw = {
+            "stride": layer.stride,
+            "padding": layer.padding,
+            "dilation": layer.dilation,
+            "groups": layer.groups,
+        }
         z = F.conv2d(x, layer.weight, layer.bias, **conv_kw)
         z = stabilize_denominator(z, epsilon, rule="epsilon")
         s = relevance_output / z
@@ -367,42 +516,68 @@ class Conv2dLRPHandler(LRPLayerHandler):
         return x * crop_spatial(c, x.shape)
 
     def _alphabeta_rule(self, layer, x, relevance_output, alpha, beta, epsilon):
-        conv_kw = dict(
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups,
-        )
+        conv_kw = {
+            "stride": layer.stride,
+            "padding": layer.padding,
+            "dilation": layer.dilation,
+            "groups": layer.groups,
+        }
         W_pos = torch.clamp(layer.weight, min=0)
         W_neg = torch.clamp(layer.weight, max=0)
         b_pos = torch.clamp(layer.bias, min=0) if layer.bias is not None else None
         b_neg = torch.clamp(layer.bias, max=0) if layer.bias is not None else None
 
-        # Use separate denominators for positive and negative paths, matching
-        # LinearLRPHandler.  This implements the standard alpha-beta formula:
-        #   R_i = alpha * sum_j (z_ij+ / z_j+) * R_j
-        #         - beta  * sum_j (z_ij- / z_j-) * R_j
-        z_pos = F.conv2d(x, W_pos, b_pos, **conv_kw)
-        z_neg = F.conv2d(x, W_neg, b_neg, **conv_kw)
-        denom_pos = stabilize_denominator(z_pos, epsilon, rule="epsilon")
-        denom_neg = stabilize_denominator(z_neg, epsilon, rule="epsilon")
+        # Split the input as well as the weights, so that each path collects only
+        # same-signed contributions z_ij = x_i * w_ij (see LinearLRPHandler):
+        #   z+ = conv(x+, W+) + conv(x-, W-)
+        #   z- = conv(x+, W-) + conv(x-, W+)
+        # Pairing W+ with a signed input would mix the two and let relevance flip
+        # sign even when beta == 0.
+        x_pos = torch.clamp(x, min=0)
+        x_neg = torch.clamp(x, max=0)
+
+        z_pos = F.conv2d(x_pos, W_pos, b_pos, **conv_kw) + F.conv2d(
+            x_neg, W_neg, None, **conv_kw
+        )
+        z_neg = F.conv2d(x_pos, W_neg, b_neg, **conv_kw) + F.conv2d(
+            x_neg, W_pos, None, **conv_kw
+        )
+        denom_pos = z_pos + epsilon
+        denom_neg = z_neg - epsilon
 
         out_pad = conv_output_padding(layer, z_pos.shape, x.shape)
-        trans_kw = dict(
-            stride=layer.stride, padding=layer.padding,
-            output_padding=out_pad, dilation=layer.dilation, groups=layer.groups,
-        )
-        c_pos = crop_spatial(
-            F.conv_transpose2d(relevance_output / denom_pos, W_pos, None, **trans_kw), x.shape
-        )
-        c_neg = crop_spatial(
-            F.conv_transpose2d(relevance_output / denom_neg, W_neg, None, **trans_kw), x.shape
-        )
-        return x * (alpha * c_pos - beta * c_neg)
+        trans_kw = {
+            "stride": layer.stride, "padding": layer.padding,
+            "output_padding": out_pad, "dilation": layer.dilation,
+            "groups": layer.groups,
+        }
+        s_pos = relevance_output / denom_pos
+        s_neg = relevance_output / denom_neg
+
+        def _back(s, W):
+            return crop_spatial(
+                F.conv_transpose2d(s, W, None, **trans_kw), x.shape
+            )
+
+        c_pos = x_pos * _back(s_pos, W_pos) + x_neg * _back(s_pos, W_neg)
+        c_neg = x_pos * _back(s_neg, W_neg) + x_neg * _back(s_neg, W_pos)
+        return alpha * c_pos - beta * c_neg
 
 
 class MaxPool2dLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.MaxPool2d — winner-take-all relevance routing."""
+    """LRP handler for nn.MaxPool2d — winner-take-all relevance routing.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import MaxPool2dLRPHandler
+        >>> layer, handler = nn.MaxPool2d(kernel_size=2, stride=2), MaxPool2dLRPHandler()
+        >>> x = torch.randn(1, 1, 4, 4)
+        >>> z = layer(x)
+        >>> handler.forward_hook(layer, (x,), z)
+        >>> handler.backward_relevance(layer, torch.ones_like(z)).shape
+        torch.Size([1, 1, 4, 4])
+    """
 
     def __init__(self):
         super().__init__(name="MaxPool2dHandler")
@@ -445,7 +620,19 @@ class MaxPool2dLRPHandler(LRPLayerHandler):
 
 
 class AvgPool2dLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.AvgPool2d — uniform relevance distribution via transposed conv."""
+    """LRP handler for nn.AvgPool2d — uniform relevance distribution via transposed conv.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import AvgPool2dLRPHandler
+        >>> layer, handler = nn.AvgPool2d(kernel_size=2, stride=2), AvgPool2dLRPHandler()
+        >>> x = torch.randn(1, 1, 4, 4)
+        >>> z = layer(x)
+        >>> handler.forward_hook(layer, (x,), z)
+        >>> handler.backward_relevance(layer, torch.ones_like(z)).shape
+        torch.Size([1, 1, 4, 4])
+    """
 
     def __init__(self):
         super().__init__(name="AvgPool2dHandler")
@@ -466,7 +653,20 @@ class AvgPool2dLRPHandler(LRPLayerHandler):
 
 
 class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.AdaptiveAvgPool2d — uniform distribution."""
+    """LRP handler for nn.AdaptiveAvgPool2d — uniform distribution.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import AdaptiveAvgPool2dLRPHandler
+        >>> layer = nn.AdaptiveAvgPool2d((1, 1))
+        >>> handler = AdaptiveAvgPool2dLRPHandler()
+        >>> x = torch.randn(1, 2, 6, 6)
+        >>> z = layer(x)
+        >>> handler.forward_hook(layer, (x,), z)
+        >>> handler.backward_relevance(layer, torch.ones_like(z)).shape
+        torch.Size([1, 2, 6, 6])
+    """
 
     def __init__(self):
         super().__init__(name="AdaptiveAvgPool2dHandler")
@@ -503,7 +703,19 @@ class AdaptiveAvgPool2dLRPHandler(LRPLayerHandler):
 
 
 class FlattenLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.Flatten — reshape relevance back."""
+    """LRP handler for nn.Flatten — reshape relevance back.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import FlattenLRPHandler
+        >>> layer, handler = nn.Flatten(), FlattenLRPHandler()
+        >>> x = torch.randn(1, 2, 3, 3)
+        >>> z = layer(x)
+        >>> handler.forward_hook(layer, (x,), z)
+        >>> handler.backward_relevance(layer, torch.ones_like(z)).shape
+        torch.Size([1, 2, 3, 3])
+    """
 
     def __init__(self):
         super().__init__(name="FlattenHandler")
@@ -523,7 +735,20 @@ class FlattenLRPHandler(LRPLayerHandler):
 
 
 class BatchNorm2dLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.BatchNorm2d — pass relevance through."""
+    """LRP handler for nn.BatchNorm2d — pass relevance through.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import BatchNorm2dLRPHandler
+        >>> handler = BatchNorm2dLRPHandler()
+        >>> handler.supports(nn.BatchNorm2d(3))
+        True
+        >>> relevance = torch.ones(1, 3, 4, 4)
+        >>> out = handler.backward_relevance(nn.BatchNorm2d(3), relevance)
+        >>> bool(torch.equal(out, relevance))
+        True
+    """
 
     def __init__(self):
         super().__init__(name="BatchNorm2dHandler")
@@ -536,7 +761,19 @@ class BatchNorm2dLRPHandler(LRPLayerHandler):
 
 
 class DropoutLRPHandler(LRPLayerHandler):
-    """LRP handler for nn.Dropout — identity in eval mode."""
+    """LRP handler for nn.Dropout — identity in eval mode.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import DropoutLRPHandler
+        >>> handler = DropoutLRPHandler()
+        >>> handler.supports(nn.Dropout(0.5))
+        True
+        >>> relevance = torch.ones(1, 4)
+        >>> bool(torch.equal(handler.backward_relevance(nn.Dropout(), relevance), relevance))
+        True
+    """
 
     def __init__(self):
         super().__init__(name="DropoutHandler")
@@ -555,6 +792,18 @@ class RNNLRPHandler(LRPLayerHandler):
     uses the simple heuristic of distributing the hidden-state relevance
     uniformly across all input time-steps, which is consistent with the
     epsilon-rule interpretation of the recurrent read-out.
+
+    Examples:
+        >>> import torch
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import RNNLRPHandler
+        >>> layer = nn.LSTM(input_size=4, hidden_size=3, batch_first=True)
+        >>> handler = RNNLRPHandler()
+        >>> x = torch.randn(1, 5, 4)
+        >>> out, _ = layer(x)
+        >>> handler.forward_hook(layer, (x,), out)
+        >>> handler.backward_relevance(layer, torch.ones(1, 3)).shape
+        torch.Size([1, 5, 3])
     """
 
     def __init__(self):
@@ -580,7 +829,17 @@ class RNNLRPHandler(LRPLayerHandler):
 
 
 def create_default_registry() -> LRPHandlerRegistry:
-    """Create a registry with handlers for all supported layer types."""
+    """Create a registry with handlers for all supported layer types.
+
+    Examples:
+        >>> from torch import nn
+        >>> from pyhealth.interpret.methods.lrp_base import create_default_registry
+        >>> registry = create_default_registry()
+        >>> registry.get_handler(nn.Linear(4, 2)).name
+        'LinearHandler'
+        >>> registry.get_handler(nn.Conv2d(1, 1, 3)).name
+        'Conv2dHandler'
+    """
     registry = LRPHandlerRegistry()
     registry.register(LinearLRPHandler())
     registry.register(ReLULRPHandler())

@@ -143,10 +143,15 @@ def main():
             out["loss"].backward()
             optimizer.step()
             total_loss += out["loss"].item()
-            preds = out["y_prob"]
-            labels = batch["label"].squeeze()
-            correct += ((preds > 0.5).long() == labels).sum().item()
-            total += labels.size(0)
+            # squeeze(-1) rather than squeeze(): y_prob is [B, 1] and label
+            # is [B, 1], so a bare squeeze() collapses a batch of 1 to a
+            # scalar. Matching both to [B] keeps the comparison elementwise --
+            # comparing [B, 1] against [B] would broadcast to a [B, B] matrix
+            # and count up to B**2 hits against a denominator of B.
+            preds = (out["y_prob"].squeeze(-1) > 0.5).long()
+            labels = batch["label"].squeeze(-1).long()
+            correct += (preds == labels).sum().item()
+            total += labels.numel()
         print(f"  Epoch {epoch+1}/3: loss={total_loss/len(train_loader):.4f}, "
               f"acc={100*correct/total:.1f}%")
 

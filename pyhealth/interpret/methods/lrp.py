@@ -11,28 +11,29 @@ References:
 
 import contextlib
 import logging
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Optional, Literal
+from typing import Literal, Self
 
-from pyhealth.models import BaseModel
+import torch
+import torch.nn.functional as F
+from torch import nn
+
 from pyhealth.interpret.api import Interpretable
 from pyhealth.interpret.methods.base_interpreter import BaseInterpreter
 from pyhealth.interpret.methods.lrp_base import (
-    stabilize_denominator,
-    LRPHandlerRegistry,
-    LinearLRPHandler,
-    ReLULRPHandler,
-    Conv2dLRPHandler,
-    MaxPool2dLRPHandler,
-    AvgPool2dLRPHandler,
     AdaptiveAvgPool2dLRPHandler,
+    AvgPool2dLRPHandler,
     BatchNorm2dLRPHandler,
-    FlattenLRPHandler,
+    Conv2dLRPHandler,
     DropoutLRPHandler,
+    FlattenLRPHandler,
+    LinearLRPHandler,
+    LRPHandlerRegistry,
+    MaxPool2dLRPHandler,
+    ReLULRPHandler,
     RNNLRPHandler,
+    stabilize_denominator,
 )
+from pyhealth.models import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +48,11 @@ class _LRPHookContext(contextlib.AbstractContextManager):
 
     def __init__(self, model: nn.Module) -> None:
         self.model = model
-        self.activations: Dict[str, dict] = {}
+        self.activations: dict[str, dict] = {}
         self.hooks: list = []
-        self.residual_blocks: Dict[str, dict] = {}
+        self.residual_blocks: dict[str, dict] = {}
 
-    def __enter__(self) -> "_LRPHookContext":
+    def __enter__(self) -> Self:
         self._register_hooks()
         return self
 
@@ -63,7 +64,7 @@ class _LRPHookContext(contextlib.AbstractContextManager):
         self.residual_blocks.clear()
         return False
 
-    def _register_hooks(self) -> None:  # noqa: C901
+    def _register_hooks(self) -> None:
         def save_activation(name: str):
             def hook(module, input, output):
                 in_t = input[0] if isinstance(input, tuple) else input
@@ -180,9 +181,9 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
 
     def attribute(
         self,
-        target_class_idx: Optional[int] = None,
+        target_class_idx: int | None = None,
         **data,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """Compute LRP attributions for input features.
 
         Args:
@@ -218,7 +219,7 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
 
         # Build and re-append padding masks so sequence models receive them (Issue 3)
         if has_processors:
-            masks: Dict[str, torch.Tensor] = {}
+            masks: dict[str, torch.Tensor] = {}
             for k in list(inputs.keys()):
                 if k not in self.model.dataset.input_processors:
                     continue
@@ -261,7 +262,9 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
 
     def visualize(self, plt, image, relevance, title=None, method="overlay", **kwargs):
         """Visualize LRP relevance maps using SaliencyVisualizer."""
-        from pyhealth.interpret.methods.saliency_visualization import visualize_attribution
+        from pyhealth.interpret.methods.saliency_visualization import (
+            visualize_attribution,
+        )
 
         if title is None:
             title = f"LRP Attribution ({self.rule}-rule)"
@@ -347,7 +350,7 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
             output_relevance = self._init_output_relevance(logits, target_class_idx)
             result = self._propagate_relevance_backward(output_relevance, values, ctx)
         if not isinstance(result, dict):
-            result = {list(values.keys())[0]: result}
+            result = {next(iter(values)): result}
         return result
 
     def _extract_logits(
@@ -369,7 +372,7 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
 
         # Walk the activations dict (insertion = forward-execution order).
         # Keeping the last Linear hit gives the final classification head.
-        last_linear_output: Optional[torch.Tensor] = None
+        last_linear_output: torch.Tensor | None = None
         for info in ctx.activations.values():
             if isinstance(info["module"], nn.Linear):
                 last_linear_output = info["output"]
@@ -397,7 +400,7 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
         """Initialize relevance at the output layer using prediction-mode dispatch."""
         try:
             mode = self._prediction_mode()
-        except Exception:
+        except (AssertionError, AttributeError, KeyError, IndexError):
             # Fall back to shape-based heuristic for models that don't expose
             # output schema (e.g. TorchvisionModel with use_embeddings=False).
             mode = "multiclass" if logits.dim() == 2 and logits.size(-1) > 1 else "binary"
@@ -430,7 +433,7 @@ class LayerwiseRelevancePropagation(BaseInterpreter):
     # Backward propagation
     # ------------------------------------------------------------------
 
-    def _get_block_for_layer(self, layer_name: str, ctx: _LRPHookContext) -> Optional[str]:
+    def _get_block_for_layer(self, layer_name: str, ctx: _LRPHookContext) -> str | None:
         """Return the residual block prefix if this layer belongs to a tracked block."""
         for bname in ctx.residual_blocks:
             if layer_name.startswith(bname + "."):
